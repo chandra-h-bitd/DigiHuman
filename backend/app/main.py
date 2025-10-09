@@ -21,6 +21,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
 
 import requests
+import json as _json
 
 # Ensure punkt + punkt_tab for NLTK 3.9
 try:
@@ -74,9 +75,29 @@ def session_log(session_id: str, event_type: str, data: Dict[str, Any]):
     except Exception:
         pass
 
+# Config loader (JSON file with env overrides)
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+_CONFIG: Dict[str, Any] = {}
+try:
+    if os.path.isfile(_CONFIG_PATH):
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            _CONFIG = _json.load(f)
+except Exception as _e:
+    logger.info(f"Config load failed: {_e}")
+
+DEFAULT_GEMINI_EMBED = os.environ.get(
+    "GEMINI_EMBED_MODEL",
+    ((_CONFIG.get("gemini") or {}).get("embedding_model") or "models/text-embedding-004"),
+)
+DEFAULT_GEMINI_GEN = os.environ.get(
+    "GEMINI_GEN_MODEL",
+    ((_CONFIG.get("gemini") or {}).get("generation_model") or "models/gemini-2.5-flash"),
+)
+
 # Local SBERT model (lazy loaded)
 _sbert_model = None  # lazy-loaded SentenceTransformer instance
 _local_llm = None   # lazy-loaded GPT4All model instance
+_local_llm_name: Optional[str] = None  # selected local model name for diagnostics
 
 def get_sbert():
     global _sbert_model
@@ -87,21 +108,80 @@ def get_sbert():
     return _sbert_model
 
 def get_local_llm():
-    """Lazy-load a small local LLM using GPT4All. Falls back to None if not available.
-    Downloads model automatically on first use (internet required only once).
+    """Lazy-load a local LLM via GPT4All, preferring an on-disk GGUF before any downloads.
+    Preference order:
+      1) LOCAL_LLM_PATH (if it points to an existing file)
+      2) A bundled GGUF in app/models with priority to 'orca-mini-3b-gguf2-q4_0.gguf', then any *.gguf
+      3) Named models (LOCAL_LLM_MODEL or small defaults) which may trigger download
     """
-    global _local_llm
+    global _local_llm, _local_llm_name
     if _local_llm is not None:
         return _local_llm
     try:
         from gpt4all import GPT4All  # type: ignore
-        # Prefer a smaller, widely compatible model; adjust name if you have another local model
-        model_name = os.environ.get("LOCAL_LLM_MODEL", "ggml-gpt4all-j-v1.3-groovy")
-        _local_llm = GPT4All(model_name)
-        logger.info(f"Local LLM loaded: {model_name}")
+    except Exception as e:
+        logger.info(f"Local LLM unavailable (GPT4All import failed): {e}")
+        return None
+
+    # Determine models directory inside backend/app, allow config override
+    cfg_local = (_CONFIG.get("local_llm") or {})
+    cfg_dir = cfg_local.get("dir")
+    models_dir = cfg_dir or os.path.join(os.path.dirname(__file__), "models")
+    try:
+        os.makedirs(models_dir, exist_ok=True)
+    except Exception:
+        pass
+
+    # 1) Explicit path override
+    explicit_path = os.environ.get("LOCAL_LLM_PATH") or cfg_local.get("path")
+    if explicit_path and os.path.isfile(explicit_path):
+        name = os.path.basename(explicit_path)
+        directory = os.path.dirname(explicit_path)
+        try:
+            _local_llm = GPT4All(name, model_path=directory)
+            _local_llm_name = name
+            logger.info(f"Local LLM loaded from explicit path: {explicit_path}")
+            return _local_llm
+        except Exception as e:
+            logger.info(f"Failed to load local LLM from LOCAL_LLM_PATH={explicit_path}: {e}")
+
+    # 2) Prefer bundled GGUF(s)
+    preferred = [
+        "orca-mini-3b-gguf2-q4_0.gguf",
+    ]
+    chosen_name: Optional[str] = None
+    for nm in preferred:
+        p = os.path.join(models_dir, nm)
+        if os.path.isfile(p):
+            chosen_name = nm
+            break
+    if chosen_name is None:
+        # First available *.gguf in models_dir
+        try:
+            ggufs = [f for f in os.listdir(models_dir) if f.lower().endswith(".gguf")]
+            if ggufs:
+                ggufs.sort()
+                chosen_name = ggufs[0]
+        except Exception:
+            pass
+    if chosen_name:
+        try:
+            _local_llm = GPT4All(chosen_name, model_path=models_dir)
+            _local_llm_name = chosen_name
+            logger.info(f"Local LLM loaded: {chosen_name} (dir={models_dir})")
+            return _local_llm
+        except Exception as e:
+            logger.info(f"Failed to load bundled local LLM '{chosen_name}': {e}")
+
+    # 3) Fallback to named models (may download on first use)
+    model_name = os.environ.get("LOCAL_LLM_MODEL") or cfg_local.get("model") or "ggml-gpt4all-j-v1.3-groovy"
+    try:
+        _local_llm = GPT4All(model_name, model_path=models_dir)
+        _local_llm_name = model_name
+        logger.info(f"Local LLM loaded by name: {model_name} (dir={models_dir})")
         return _local_llm
     except Exception as e:
-        logger.info(f"Local LLM unavailable (GPT4All not installed or model failed to load): {e}")
+        logger.info(f"Local LLM unavailable (failed to load '{model_name}'): {e}")
         return None
 
 # ---------- Models ----------
@@ -229,59 +309,14 @@ def parse_docx(file_bytes: bytes) -> str:
 # ---------- Embeddings ----------
 
 def get_gemini_models(api_key: str) -> Dict[str, Any]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        models = [m.get("name", "") for m in data.get("models", [])]
-        # Separate candidates
-        lower_map = {m: m.lower() for m in models}
-        emb_candidates = [m for m in models if "embedding" in lower_map[m]]
-
-        # Filter out non-text or specialized generations
-        banned_tokens = [
-            "embedding",  # embeddings
-            "tts",        # text-to-speech
-            "image",      # image generation
-            "computer-use",
-            "robotics",
-            "learnlm",
-            "gemma",
-            "imagen",
-            "aqa",
-        ]
-        gen_candidates = [
-            m for m in models
-            if ("gemini" in lower_map[m] and not any(b in lower_map[m] for b in banned_tokens))
-        ]
-
-        # Prefer stable non-preview models with a clear priority
-        priority_prefixes = [
-            "models/gemini-2.5-pro",
-            "models/gemini-2.5-flash",
-            "models/gemini-2.0-pro",
-            "models/gemini-2.0-flash",
-            "models/gemini-pro",
-            "models/gemini-flash",
-        ]
-
-        def pick_generation(cands: List[str]) -> Optional[str]:
-            # prefer non-preview variants first by priority list
-            non_preview = [c for c in cands if "preview" not in lower_map[c]]
-            for pref in priority_prefixes:
-                for pool in (non_preview, cands):
-                    match = next((c for c in pool if lower_map[c].startswith(pref)), None)
-                    if match:
-                        return match
-            # fallback: last sorted candidate
-            return sorted(cands)[-1] if cands else None
-
-        emb = sorted(emb_candidates)[-1] if emb_candidates else None
-        gen = pick_generation(gen_candidates)
-        return {"embedding_model": emb, "generation_model": gen, "available_models": models}
-    except Exception:
+    # Simplified: with a key, use hardcoded defaults; otherwise, none.
+    if not api_key:
         return {"embedding_model": None, "generation_model": None, "available_models": []}
+    return {
+        "embedding_model": DEFAULT_GEMINI_EMBED,
+        "generation_model": DEFAULT_GEMINI_GEN,
+        "available_models": [DEFAULT_GEMINI_EMBED, DEFAULT_GEMINI_GEN],
+    }
 
 
 def _model_path(name: str) -> str:
@@ -326,6 +361,36 @@ def embed_with_sbert(texts: List[str]) -> np.ndarray:
 
 def generate_with_gemini(prompt: str, api_key: str, model_name: Optional[str]) -> Optional[str]:
     if not api_key or not model_name:
+        return None
+    mp = _model_path(model_name)
+    url = f"https://generativelanguage.googleapis.com/v1beta/{mp}:generateContent?key={api_key}"
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 512,
+        }
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=60)
+        if not r.ok:
+            logger.warning(f"Gemini generate error status={r.status_code} body={r.text[:200]}")
+            r.raise_for_status()
+        data = r.json()
+        cands = data.get("candidates", [])
+        if not cands:
+            logger.warning("Gemini generate returned no candidates")
+            return None
+        parts = cands[0].get("content", {}).get("parts", [])
+        out = "".join(p.get("text", "") for p in parts)
+        return out.strip() or None
+    except Exception as e:
+        logger.warning(f"Gemini generate exception: {e}")
         return None
 
 
@@ -376,29 +441,6 @@ def _bm25_rerank(question: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, 
         return [c for _, c in ranked]
     except Exception:
         return chunks
-    mp = _model_path(model_name)
-    url = f"https://generativelanguage.googleapis.com/v1beta/{mp}:generateContent?key={api_key}"
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=60)
-        if not r.ok:
-            logger.warning(f"Gemini generate error status={r.status_code} body={r.text[:200]}")
-            r.raise_for_status()
-        data = r.json()
-        cands = data.get("candidates", [])
-        if not cands:
-            logger.warning("Gemini generate returned no candidates")
-            return None
-        parts = cands[0].get("content", {}).get("parts", [])
-        out = "".join(p.get("text", "") for p in parts)
-        return out.strip() or None
-    except Exception as e:
-        logger.warning(f"Gemini generate exception: {e}")
-        return None
 
 
 def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
@@ -517,8 +559,13 @@ async def upload(file: UploadFile = File(...), session_id: Optional[str] = Form(
 
     # Embeddings: try Gemini first
     used_fallback = False
-    gem_models = get_gemini_models(gemini_api_key) if gemini_api_key else {"embedding_model": None, "generation_model": None}
-    emb_model = gem_models.get("embedding_model") if gem_models else None
+    if gemini_api_key:
+        # Hardcode embedding model when key is present
+        gem_models = {"embedding_model": DEFAULT_GEMINI_EMBED, "generation_model": DEFAULT_GEMINI_GEN}
+        emb_model = DEFAULT_GEMINI_EMBED
+    else:
+        gem_models = {"embedding_model": None, "generation_model": None}
+        emb_model = None
 
     texts = [c["text"] for c in chunks]
     logger.info(f"/upload: session={session_id} file={filename} key_provided={bool(gemini_api_key)} emb_model={emb_model}")
@@ -652,9 +699,17 @@ async def ask(req: AskRequest):
     )
     prompt = f"{system_prompt}Context:\n{context}\n\nQuestion: {req.question}\nAnswer:"
 
-    gen_model = gem_models.get("generation_model") if gem_models else None
+    # Force a single, known-good Gemini generation model when key is present
+    if req.gemini_api_key:
+        gen_model = DEFAULT_GEMINI_GEN
+    else:
+        gen_model = None
+
+    gem_attempts: List[str] = []
+    if gen_model:
+        gem_attempts.append(gen_model)
     answer = generate_with_gemini(prompt, req.gemini_api_key, gen_model)
-    generation_model_name: Optional[str] = None
+    generation_model_name: Optional[str] = gen_model
     if answer is None:
         # Try local LLM first
         local_answer = generate_with_local_llm(req.question, top_chunks)
@@ -662,7 +717,7 @@ async def ask(req: AskRequest):
             answer = local_answer
             used_fallback = True or used_fallback
             gen_provider = "local-llm"
-            generation_model_name = os.environ.get("LOCAL_LLM_MODEL", "ggml-gpt4all-j-v1.3-groovy")
+            generation_model_name = _local_llm_name or os.environ.get("LOCAL_LLM_MODEL", "local-llm")
             logger.info("/ask: fallback generation used (local LLM via GPT4All)")
         else:
             # Final resort: heuristic extractive answer
@@ -673,8 +728,7 @@ async def ask(req: AskRequest):
             logger.info("/ask: fallback generation used (heuristic)")
     else:
         gen_provider = "gemini"
-        generation_model_name = gen_model
-        logger.info(f"/ask: generation via Gemini model={gen_model}")
+        logger.info(f"/ask: generation via Gemini model={generation_model_name}")
 
     session_log(req.session_id, "ask", {
         "question": req.question,
@@ -684,6 +738,9 @@ async def ask(req: AskRequest):
         "used_fallback": used_fallback,
         "top_k": req.k,
         "returned_sources": len(top_chunks),
+        "gemini_key_provided": bool(req.gemini_api_key),
+        "gemini_attempts": gem_attempts,
+        "gemini_generation_model": generation_model_name if gen_provider == "gemini" else None,
     })
 
     return AskResponse(
@@ -712,6 +769,19 @@ async def models(gemini_api_key: Optional[str] = None):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/models/local")
+async def local_model_status():
+    """Quick diagnostic endpoint to check if a local GPT4All model is available."""
+    llm = get_local_llm()
+    if llm is None:
+        return {"available": False}
+    try:
+        name = _local_llm_name or getattr(llm, "model_name", None) or os.environ.get("LOCAL_LLM_MODEL")
+    except Exception:
+        name = _local_llm_name or os.environ.get("LOCAL_LLM_MODEL")
+    return {"available": True, "model": name}
 
 
 @app.get("/session/{session_id}/diagnostics")

@@ -1,0 +1,11 @@
+{
+  "gemini": {
+    "embedding_model": "models/text-embedding-004",
+    "generation_model": "models/gemini-2.5-flash"
+  },
+  "local_llm": {
+    "path": null,
+    "model": null,
+    "dir": null
+  }
+}
