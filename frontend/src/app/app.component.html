@@ -1,0 +1,46 @@
+<div class="container">
+  <h1>{{ title }}</h1>
+
+  <mat-card class="card">
+    <mat-card-title>Gemini API Key</mat-card-title>
+    <mat-card-content>
+      <mat-form-field appearance="outline" style="width:100%">
+        <mat-label>Enter Gemini API Key</mat-label>
+        <input matInput type="password" [(ngModel)]="geminiKey" placeholder="AIza..." />
+      </mat-form-field>
+      <div class="status">Key is kept in-memory only and sent with requests; it's never stored.</div>
+    </mat-card-content>
+  </mat-card>
+
+  <mat-card class="card">
+    <mat-card-title>Upload Document (.pdf / .docx)</mat-card-title>
+    <mat-card-content>
+      <input type="file" (change)="uploadFile($event)" accept=".pdf,.docx" />
+      <mat-progress-bar *ngIf="uploading" mode="determinate" [value]="uploadProgress"></mat-progress-bar>
+      <div *ngIf="sessionId" class="status">Session: {{ sessionId }}</div>
+      <div *ngIf="embeddingFallback" class="status">Embedding fallback was used (SBERT)</div>
+    </mat-card-content>
+  </mat-card>
+
+  <mat-card class="card">
+    <mat-card-title>Ask a question</mat-card-title>
+    <mat-card-content>
+      <div class="chat-window">
+        <div *ngFor="let m of messages" class="message" [ngClass]="m.role">
+          <strong>{{ m.role === 'user' ? 'You' : 'Assistant' }}:</strong> {{ m.text }}
+          <div *ngIf="m.sources?.length && m.role==='assistant'">
+            <div class="source" *ngFor="let s of m.sources; let i = index">[Source {{i+1}} | {{s.doc}}#{{s.chunk}}] score: {{ s.score | number:'1.2-2' }}</div>
+            <div class="source" *ngIf="m.fallback">Fallback used</div>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex; gap: 8px; margin-top: 8px;">
+        <mat-form-field appearance="outline" style="flex:1">
+          <mat-label>Your question</mat-label>
+          <input matInput [(ngModel)]="question" (keyup.enter)="ask()" />
+        </mat-form-field>
+        <button mat-raised-button color="primary" (click)="ask()" [disabled]="answering">Ask</button>
+      </div>
+    </mat-card-content>
+  </mat-card>
+</div>

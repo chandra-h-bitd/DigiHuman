@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+backend/venv/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Mac
+.DS_Store
+
+
+frontend/.angular/
+
+venv/
+
+frontend/package-lock.json
+package-lock.json
