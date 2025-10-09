@@ -1,46 +1,90 @@
-<div class="container">
-  <h1>{{ title }}</h1>
+<header class="app-header">
+  <div class="left">
+    <span class="app-title">Doc Q&A</span>
+  </div>
+  <div class="center">
+    <span class="doc-name">{{ uploadedFile?.name || 'No document' }}</span>
+  </div>
+  <div class="right">
+    <button mat-icon-button aria-label="Settings"><mat-icon>settings</mat-icon></button>
+  </div>
+</header>
 
-  <mat-card class="card">
-    <mat-card-title>Gemini API Key</mat-card-title>
-    <mat-card-content>
-      <mat-form-field appearance="outline" style="width:100%">
-        <mat-label>Enter Gemini API Key</mat-label>
-        <input matInput type="password" [(ngModel)]="geminiKey" placeholder="AIza..." />
-      </mat-form-field>
-      <div class="status">Key is kept in-memory only and sent with requests; it's never stored.</div>
-    </mat-card-content>
-  </mat-card>
-
-  <mat-card class="card">
-    <mat-card-title>Upload Document (.pdf / .docx)</mat-card-title>
-    <mat-card-content>
-      <input type="file" (change)="uploadFile($event)" accept=".pdf,.docx" />
-      <mat-progress-bar *ngIf="uploading" mode="determinate" [value]="uploadProgress"></mat-progress-bar>
-      <div *ngIf="sessionId" class="status">Session: {{ sessionId }}</div>
-      <div *ngIf="embeddingFallback" class="status">Embedding fallback was used (SBERT)</div>
-    </mat-card-content>
-  </mat-card>
-
-  <mat-card class="card">
-    <mat-card-title>Ask a question</mat-card-title>
-    <mat-card-content>
-      <div class="chat-window">
-        <div *ngFor="let m of messages" class="message" [ngClass]="m.role">
-          <strong>{{ m.role === 'user' ? 'You' : 'Assistant' }}:</strong> {{ m.text }}
-          <div *ngIf="m.sources?.length && m.role==='assistant'">
-            <div class="source" *ngFor="let s of m.sources; let i = index">[Source {{i+1}} | {{s.doc}}#{{s.chunk}}] score: {{ s.score | number:'1.2-2' }}</div>
-            <div class="source" *ngIf="m.fallback">Fallback used</div>
-          </div>
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar" [class.collapsed]="!sidebarOpen" aria-label="Sidebar">
+    <!-- API Config -->
+    <section class="section" [class.compact]="apiCollapsed">
+      <div class="section-header" (click)="apiCollapsed = !apiCollapsed" role="button" tabindex="0">
+        <div class="title"><mat-icon>vpn_key</mat-icon> API Config</div>
+        <div class="status-badge" [class.ok]="keyStatus==='valid'">{{ keyStatus==='valid' ? 'Connected' : 'Not configured' }}</div>
+      </div>
+      <div class="section-body" *ngIf="!apiCollapsed">
+        <div class="input-row">
+          <input class="input" [type]="keyVisible ? 'text' : 'password'" [(ngModel)]="geminiKey" placeholder="Gemini API key" aria-label="Gemini API key">
+          <button class="icon-btn" (click)="keyVisible=!keyVisible" [attr.aria-label]="keyVisible ? 'Hide key' : 'Show key'"><mat-icon>{{ keyVisible ? 'visibility_off' : 'visibility' }}</mat-icon></button>
+          <button class="btn" (click)="validateKey()" [disabled]="keyStatus==='checking'">{{ keyStatus==='checking' ? 'Checking…' : 'Validate' }}</button>
         </div>
+        <div class="helper">Key is only used in this browser and sent per request; it is not stored.</div>
       </div>
-      <div style="display:flex; gap: 8px; margin-top: 8px;">
-        <mat-form-field appearance="outline" style="flex:1">
-          <mat-label>Your question</mat-label>
-          <input matInput [(ngModel)]="question" (keyup.enter)="ask()" />
-        </mat-form-field>
-        <button mat-raised-button color="primary" (click)="ask()" [disabled]="answering">Ask</button>
+    </section>
+
+    <!-- Upload -->
+    <section class="section" [class.compact]="uploadCollapsed">
+      <div class="section-header" (click)="uploadCollapsed = !uploadCollapsed" role="button" tabindex="0">
+        <div class="title"><mat-icon>upload_file</mat-icon> Upload</div>
+        <div class="status-badge" [class.ok]="!!uploadedFile">{{ uploadedFile ? 'Uploaded' : 'No file' }}</div>
       </div>
-    </mat-card-content>
-  </mat-card>
+      <div class="section-body" *ngIf="!uploadCollapsed">
+        <div class="dropzone" [class.drag-over]="dragOver" (dragover)="onDragOver($event)" (dragleave)="onDragLeave($event)" (drop)="onDrop($event)" (click)="fileInput.click()" role="button" tabindex="0" aria-label="Drag and drop or click to select a PDF or DOCX">
+          <input #fileInput type="file" class="hidden-input" (change)="uploadFile($event)" accept=".pdf,.docx">
+          <mat-icon>cloud_upload</mat-icon>
+          <div>PDF • DOCX (Max 10MB)</div>
+        </div>
+        <div class="file-card" *ngIf="uploadedFile">
+          <mat-icon>description</mat-icon>
+          <div class="meta">
+            <div class="name">{{ uploadedFile.name }}</div>
+            <div class="size">{{ uploadedFile.size/1024 | number:'1.0-0' }} KB</div>
+          </div>
+          <button class="icon-btn" (click)="clearFile()" aria-label="Remove file"><mat-icon>close</mat-icon></button>
+        </div>
+        <mat-progress-bar *ngIf="uploading" mode="determinate" [value]="uploadProgress"></mat-progress-bar>
+        <div class="helper" *ngIf="embeddingFallback">Embedding fallback (SBERT) was used</div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Main Chat -->
+  <main class="main">
+    <div class="empty" *ngIf="messages.length === 0">
+      <mat-icon class="empty-icon">chat</mat-icon>
+      <div class="empty-title">Ask about your document</div>
+      <div class="chips">
+        <button class="chip" *ngFor="let s of suggestedQuestions" (click)="question=s; ask()">{{ s }}</button>
+      </div>
+    </div>
+
+    <div class="messages" *ngIf="messages.length > 0" aria-live="polite">
+      <div class="msg" *ngFor="let m of messages" [class.user]="m.role==='user'" [class.assistant]="m.role==='assistant'">
+        <div class="meta-row">
+          <span class="who">{{ m.role==='user' ? 'You' : 'Assistant' }}</span>
+          <span class="time" *ngIf="m.ts">{{ formatTime(m.ts) }}</span>
+        </div>
+        <div class="text" *ngIf="m.role==='user'">{{ m.text }}</div>
+        <div class="text" *ngIf="m.role==='assistant'" [innerHTML]="renderMarkdown(m.text)"></div>
+        <div class="sources" *ngIf="m.sources?.length && m.role==='assistant'">
+          <div class="src" *ngFor="let s of m.sources; let i=index">[{{i+1}}] {{ s.doc }}#{{ s.chunk }} · {{ s.score | number:'1.2-2' }}</div>
+          <div class="src warn" *ngIf="m.fallback">Used fallback</div>
+        </div>
+        <div class="sep"></div>
+      </div>
+      <div class="typing" *ngIf="answering"><span></span><span></span><span></span></div>
+    </div>
+
+    <div class="input-bar">
+      <textarea class="input" cdkTextareaAutosize [(ngModel)]="question" (keyup.enter)="ask()" rows="1" placeholder="Ask a question…" aria-label="Type your question"></textarea>
+      <button class="send" (click)="ask()" [disabled]="!question.trim()"><mat-icon>send</mat-icon></button>
+    </div>
+  </main>
 </div>

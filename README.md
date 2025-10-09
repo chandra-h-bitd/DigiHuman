@@ -11,6 +11,13 @@ Single-page Angular app with FastAPI backend. Upload PDFs/DOCX, embed with Gemin
 
 ## Local setup
 
+If this is your first time on a fresh machine, follow an OS-specific guide first:
+
+- macOS: docs/SETUP-macOS.md
+- Windows: docs/SETUP-Windows.md
+
+Quickstart (after prerequisites):
+
 Backend:
 
 ```
