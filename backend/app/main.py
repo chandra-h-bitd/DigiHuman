@@ -76,6 +76,7 @@ def session_log(session_id: str, event_type: str, data: Dict[str, Any]):
 
 # Local SBERT model (lazy loaded)
 _sbert_model = None  # lazy-loaded SentenceTransformer instance
+_local_llm = None   # lazy-loaded GPT4All model instance
 
 def get_sbert():
     global _sbert_model
@@ -85,11 +86,32 @@ def get_sbert():
         _sbert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     return _sbert_model
 
+def get_local_llm():
+    """Lazy-load a small local LLM using GPT4All. Falls back to None if not available.
+    Downloads model automatically on first use (internet required only once).
+    """
+    global _local_llm
+    if _local_llm is not None:
+        return _local_llm
+    try:
+        from gpt4all import GPT4All  # type: ignore
+        # Prefer a smaller, widely compatible model; adjust name if you have another local model
+        model_name = os.environ.get("LOCAL_LLM_MODEL", "ggml-gpt4all-j-v1.3-groovy")
+        _local_llm = GPT4All(model_name)
+        logger.info(f"Local LLM loaded: {model_name}")
+        return _local_llm
+    except Exception as e:
+        logger.info(f"Local LLM unavailable (GPT4All not installed or model failed to load): {e}")
+        return None
+
 # ---------- Models ----------
 class UploadResponse(BaseModel):
     session_id: str
     chunks_indexed: int
     used_fallback: bool
+    embed_provider: str
+    embedding_model: Optional[str]
+    vector_dim: Optional[int]
 
 class AskRequest(BaseModel):
     session_id: str
@@ -101,6 +123,10 @@ class AskResponse(BaseModel):
     answer: str
     sources: List[Dict[str, Any]]
     used_fallback: bool
+    gen_provider: str
+    generation_model: Optional[str]
+    embed_provider: str
+    embedding_model: Optional[str]
 
 class ModelsResponse(BaseModel):
     embedding_model: Optional[str]
@@ -301,6 +327,55 @@ def embed_with_sbert(texts: List[str]) -> np.ndarray:
 def generate_with_gemini(prompt: str, api_key: str, model_name: Optional[str]) -> Optional[str]:
     if not api_key or not model_name:
         return None
+
+
+def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]], max_chars: int = 8000) -> Optional[str]:
+    """Generate an answer with a local LLM (GPT4All) using provided chunks as context.
+    Returns None if local LLM is not available or generation fails.
+    """
+    llm = get_local_llm()
+    if llm is None:
+        return None
+    # Build compact context up to max_chars
+    parts = []
+    total = 0
+    for i, c in enumerate(chunks):
+        header = f"[Source {i+1} | {c.get('doc','')}#{c.get('chunk',-1)}]\n"
+        body = c.get("text", "").strip()
+        seg = header + body + "\n\n"
+        if total + len(seg) > max_chars:
+            break
+        parts.append(seg)
+        total += len(seg)
+
+    context = "".join(parts)
+    system = (
+        "You are a helpful assistant. Answer the user's question using only the provided context. "
+        "If the answer is not present, say you don't know. Cite sources as [Source N].\n\n"
+    )
+    prompt = f"{system}Context:\n{context}\nQuestion: {question}\nAnswer:"
+    try:
+        # GPT4All chat session keeps context local; deterministic-ish output
+        with llm.chat_session():
+            out = llm.generate(prompt, max_tokens=512, temp=0.2)
+        return (out or "").strip() or None
+    except Exception as e:
+        logger.info(f"Local LLM generation failed: {e}")
+        return None
+
+
+def _bm25_rerank(question: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Optional BM25 re-ranking of retrieved chunks. Returns re-ordered list or original on error."""
+    try:
+        from rank_bm25 import BM25Okapi  # type: ignore
+        tokenized = [re.findall(r"\w+", c.get("text", "").lower()) for c in chunks]
+        bm = BM25Okapi(tokenized)
+        q_tokens = re.findall(r"\w+", question.lower())
+        scores = bm.get_scores(q_tokens)
+        ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+        return [c for _, c in ranked]
+    except Exception:
+        return chunks
     mp = _model_path(model_name)
     url = f"https://generativelanguage.googleapis.com/v1beta/{mp}:generateContent?key={api_key}"
     payload = {
@@ -327,26 +402,92 @@ def generate_with_gemini(prompt: str, api_key: str, model_name: Optional[str]) -
 
 
 def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
-    # simple concatenation and answer heuristic
-    context = "\n\n".join(ch["text"] for ch in chunks)
-    # crude rule-based try: if 'summarize' in question
-    if re.search(r"summari[sz]e|overview|what is this document", question, re.I):
-        # return first 3 sentences
-        sents = sent_tokenize(context)
-        return " ".join(sents[:5])
-    # otherwise echo likely relevant sentences containing keywords
-    q_words = set(w.lower() for w in re.findall(r"\w+", question))
-    sents = sent_tokenize(context)
-    scored = []
-    for s in sents:
-        sw = set(w.lower() for w in re.findall(r"\w+", s))
-        score = len(q_words & sw)
-        if score:
-            scored.append((score, s))
-    scored.sort(reverse=True, key=lambda x: x[0])
-    if not scored:
+    # Improved heuristic with BM25 sentence ranking and citations; falls back to keyword overlap.
+    if not chunks:
         return "I couldn't find enough information in the document to answer that."
-    return " ".join(s for _, s in scored[:5])
+
+    # Build sentence pool with source mapping
+    sent_pool: List[Dict[str, Any]] = []
+    for i, ch in enumerate(chunks):
+        src_tag = f"[Source {i+1}]"
+        for s in sent_tokenize(ch.get("text", "")):
+            s_clean = re.sub(r"\s+", " ", s).strip()
+            if not s_clean:
+                continue
+            sent_pool.append({
+                "text": s_clean,
+                "src": src_tag,
+                "doc": ch.get("doc", ""),
+                "chunk": ch.get("chunk", -1),
+            })
+
+    if not sent_pool:
+        return "I couldn't find enough information in the document to answer that."
+
+    # Summary intent detection
+    is_summary = bool(re.search(r"summari[sz]e|overview|bullet|key\s*takeaways|high\s*level|main\s*points", question, re.I))
+
+    # Try BM25 scoring first
+    bm25_scores: List[float] = []
+    try:
+        from rank_bm25 import BM25Okapi  # type: ignore
+        tokenized = [re.findall(r"\w+", s["text"].lower()) for s in sent_pool]
+        bm = BM25Okapi(tokenized)
+        q_tokens = re.findall(r"\w+", question.lower())
+        bm25_scores = bm.get_scores(q_tokens)
+    except Exception:
+        # Fallback: keyword overlap score
+        q_words = set(w.lower() for w in re.findall(r"\w+", question))
+        for s in sent_pool:
+            sw = set(w.lower() for w in re.findall(r"\w+", s["text"]))
+            bm25_scores.append(len(q_words & sw))
+
+    # Rank sentences
+    ranked = sorted(zip(bm25_scores, sent_pool), key=lambda x: x[0], reverse=True)
+
+    # If summary requested, select diverse top sentences across different chunks
+    if is_summary:
+        picked: List[Dict[str, Any]] = []
+        seen_chunks: set = set()
+        for score, s in ranked:
+            if len(picked) >= 5:
+                break
+            # prefer diversity of chunks and avoid very short sentences
+            if s["chunk"] in seen_chunks:
+                continue
+            if len(s["text"].split()) < 5:
+                continue
+            picked.append(s)
+            seen_chunks.add(s["chunk"])
+        # If still few, fill from remaining
+        if len(picked) < 5:
+            for score, s in ranked:
+                if len(picked) >= 5:
+                    break
+                if s in picked or len(s["text"].split()) < 5:
+                    continue
+                picked.append(s)
+        if not picked:
+            return "I couldn't find enough information in the document to summarize."
+        bullets = "\n".join(f"- {s['text']} {s['src']}" for s in picked)
+        return bullets
+
+    # Otherwise, assemble an extractive answer from top sentences with citations
+    top_n = 5
+    selected = []
+    for score, s in ranked:
+        if len(selected) >= top_n:
+            break
+        if len(s["text"].split()) < 5:
+            continue
+        selected.append(s)
+
+    if not selected:
+        return "I couldn't find enough information in the document to answer that."
+
+    # Join as a concise paragraph with inline citations
+    answer = " ".join(f"{s['text']} {s['src']}" for s in selected)
+    return answer.strip()
 
 
 # ---------- API ----------
@@ -391,6 +532,13 @@ async def upload(file: UploadFile = File(...), session_id: Optional[str] = Form(
         embed_provider = "gemini"
         logger.info(f"/upload: embeddings via Gemini model={emb_model}")
 
+    # Determine embedding model name for response/logs
+    embedding_model_name: Optional[str] = None
+    if embed_provider == "gemini":
+        embedding_model_name = emb_model
+    else:
+        embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+
     # upsert to qdrant with session-specific payload
     dim = int(vecs.shape[1])
     coll = collection_name(session_id)
@@ -429,12 +577,19 @@ async def upload(file: UploadFile = File(...), session_id: Optional[str] = Form(
         "doc": filename,
         "chunks_indexed": len(points),
         "embed_provider": embed_provider,
-        "embedding_model": emb_model,
+        "embedding_model": embedding_model_name,
         "vector_dim": int(vecs.shape[1]) if hasattr(vecs, 'shape') else None,
         "key_provided": bool(gemini_api_key),
     })
 
-    return UploadResponse(session_id=session_id, chunks_indexed=len(points), used_fallback=used_fallback)
+    return UploadResponse(
+        session_id=session_id,
+        chunks_indexed=len(points),
+        used_fallback=used_fallback,
+        embed_provider=embed_provider,
+        embedding_model=embedding_model_name,
+        vector_dim=int(vecs.shape[1]) if hasattr(vecs, 'shape') else None,
+    )
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -461,6 +616,9 @@ async def ask(req: AskRequest):
         embed_provider = "gemini"
         logger.info("/ask: question embedding via Gemini")
 
+    # Embedding model name used for the question
+    embedding_model_name: Optional[str] = emb_model if embed_provider == "gemini" else "sentence-transformers/all-MiniLM-L6-v2"
+
     coll = collection_name(req.session_id)
     top_chunks = []
     try:
@@ -482,6 +640,10 @@ async def ask(req: AskRequest):
         # No collection or search error; proceed with heuristic only
         top_chunks = []
 
+    # Optional: BM25 re-ranking of the retrieved chunks for better local generation
+    if top_chunks:
+        top_chunks = _bm25_rerank(req.question, top_chunks)
+
     context = "\n\n".join(f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" for i, c in enumerate(top_chunks))
 
     system_prompt = (
@@ -492,25 +654,47 @@ async def ask(req: AskRequest):
 
     gen_model = gem_models.get("generation_model") if gem_models else None
     answer = generate_with_gemini(prompt, req.gemini_api_key, gen_model)
+    generation_model_name: Optional[str] = None
     if answer is None:
-        answer = heuristic_answer(req.question, top_chunks)
-        used_fallback = True or used_fallback
-        gen_provider = "heuristic"
-        logger.info("/ask: fallback generation used (heuristic)")
+        # Try local LLM first
+        local_answer = generate_with_local_llm(req.question, top_chunks)
+        if local_answer:
+            answer = local_answer
+            used_fallback = True or used_fallback
+            gen_provider = "local-llm"
+            generation_model_name = os.environ.get("LOCAL_LLM_MODEL", "ggml-gpt4all-j-v1.3-groovy")
+            logger.info("/ask: fallback generation used (local LLM via GPT4All)")
+        else:
+            # Final resort: heuristic extractive answer
+            answer = heuristic_answer(req.question, top_chunks)
+            used_fallback = True or used_fallback
+            gen_provider = "heuristic"
+            generation_model_name = None
+            logger.info("/ask: fallback generation used (heuristic)")
     else:
         gen_provider = "gemini"
+        generation_model_name = gen_model
         logger.info(f"/ask: generation via Gemini model={gen_model}")
 
     session_log(req.session_id, "ask", {
         "question": req.question,
         "embed_provider": embed_provider,
+        "embedding_model": embedding_model_name,
         "gen_provider": gen_provider,
         "used_fallback": used_fallback,
         "top_k": req.k,
         "returned_sources": len(top_chunks),
     })
 
-    return AskResponse(answer=answer, sources=top_chunks, used_fallback=used_fallback)
+    return AskResponse(
+        answer=answer,
+        sources=top_chunks,
+        used_fallback=used_fallback,
+        gen_provider=gen_provider,
+        generation_model=generation_model_name,
+        embed_provider=embed_provider,
+        embedding_model=embedding_model_name,
+    )
 
 
 @app.get("/models", response_model=ModelsResponse)
