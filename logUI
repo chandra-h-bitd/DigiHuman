@@ -1,0 +1,4 @@
+rror code UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+npm error errno UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+npm error request to https://registry.npmjs.org/@angular-devkit%2fbuild-angular failed, reason: unable to get local issuer certificate
+npm error A complete log of this run can be found in: C:\Users\331865\AppData\Local\npm-cache\_logs\2025-10-09T15_29_38_992
