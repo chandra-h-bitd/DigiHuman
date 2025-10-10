@@ -13,7 +13,8 @@ export class ApiService {
     if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
       return 'http://localhost:8000'; // Local development
     }
-    return '/api'; // Deployed (Vercel)
+    // TODO: Replace with your Railway URL after deployment
+    return 'https://your-railway-app.up.railway.app'; // Railway backend
   }
 
   upload(file: File, sessionId?: string, geminiKey?: string): Observable<HttpEvent<any>> {

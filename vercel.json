@@ -7,26 +7,12 @@
       "config": {
         "distDir": "frontend/dist"
       }
-    },
-    {
-      "src": "backend/app/main.py", 
-      "use": "@vercel/python",
-      "config": {
-        "maxLambdaSize": "50mb"
-      }
     }
   ],
   "routes": [
     {
-      "src": "/api/(.*)",
-      "dest": "backend/app/main.py"
-    },
-    {
       "src": "/(.*)",
       "dest": "frontend/dist/$1"
     }
-  ],
-  "env": {
-    "PYTHONPATH": "backend"
-  }
+  ]
 }
