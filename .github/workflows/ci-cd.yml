@@ -1,0 +1,73 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ master, integratedWithCICD ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    name: Test Backend
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run backend tests
+      run: |
+        cd backend
+        python -m pytest tests/ -v
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    name: Test Frontend
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm install
+        
+    - name: Run frontend tests
+      run: |
+        cd frontend
+        npm run test -- --watch=false --browsers=ChromeHeadless
+        
+    - name: Build frontend
+      run: |
+        cd frontend
+        npm run build
+
+  deploy:
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    name: Deploy to Vercel
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/integratedWithCICD'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to Vercel
+      uses: amondnet/vercel-action@v25
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        vercel-args: '--prod'
+        vercel-org-id: ${{ secrets.ORG_ID}}
+        vercel-project-id: ${{ secrets.PROJECT_ID}}
+        working-directory: ./

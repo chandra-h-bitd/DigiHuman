@@ -4,8 +4,17 @@ import { Observable } from 'rxjs';
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
-  backendUrl = 'http://localhost:8000';
+  backendUrl = this.getBackendUrl();
+  
   constructor(private http: HttpClient) {}
+
+  private getBackendUrl(): string {
+    // Auto-detect environment
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return 'http://localhost:8000'; // Local development
+    }
+    return '/api'; // Deployed (Vercel)
+  }
 
   upload(file: File, sessionId?: string, geminiKey?: string): Observable<HttpEvent<any>> {
     const form = new FormData();

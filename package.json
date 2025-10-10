@@ -1,0 +1,15 @@
+{
+  "name": "docqa-app",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "cd frontend && npm install && npm run build",
+    "dev": "cd frontend && npm start",
+    "test": "cd frontend && npm test",
+    "test:backend": "cd backend && python -m pytest tests/",
+    "start": "cd backend && python app/main.py"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

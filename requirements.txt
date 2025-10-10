@@ -1,0 +1,8 @@
+nltk
+sentence-transformers
+qdrant-client
+fastapi
+PyMuPDF
+python-docx
+numpy
+requests
