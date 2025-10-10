@@ -13,8 +13,8 @@ export class ApiService {
     if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
       return 'http://localhost:8000'; // Local development
     }
-    // TODO: Replace with your Railway URL after deployment
-    return 'ntt-production.up.railway.app'; // Railway backend
+    // Railway backend with proper HTTPS protocol
+    return 'https://ntt-production.up.railway.app'; // Railway backend
   }
 
   upload(file: File, sessionId?: string, geminiKey?: string): Observable<HttpEvent<any>> {
