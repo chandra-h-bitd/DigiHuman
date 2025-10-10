@@ -1,0 +1,14 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install --no-cache-dir -r requirements.txt"
+
+[deploy]
+startCommand = "python app/main.py"
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+
+[variables]
+PORT = "8000"
+PYTHONPATH = "/app"
+PYTHONUNBUFFERED = "1"
