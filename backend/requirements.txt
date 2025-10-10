@@ -1,11 +1,7 @@
-fastapi==0.104.1
-uvicorn==0.24.0
+fastapi==0.103.0
+uvicorn==0.23.0
 python-multipart==0.0.6
-pydantic==2.4.2
-PyMuPDF==1.23.8
+PyMuPDF==1.22.5
 python-docx==0.8.11
 nltk==3.8.1
-qdrant-client==1.6.9
-sentence-transformers==2.2.2
 requests==2.31.0
-numpy==1.24.4
