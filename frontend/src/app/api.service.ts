@@ -14,7 +14,7 @@ export class ApiService {
       return 'http://localhost:8000'; // Local development
     }
     // TODO: Replace with your Railway URL after deployment
-    return 'https://your-railway-app.up.railway.app'; // Railway backend
+    return 'ntt-production.up.railway.app'; // Railway backend
   }
 
   upload(file: File, sessionId?: string, geminiKey?: string): Observable<HttpEvent<any>> {

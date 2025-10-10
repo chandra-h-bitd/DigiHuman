@@ -50,7 +50,7 @@
 
 1. **Update API Service**
    - Copy your Railway backend URL from Step 1
-   - Replace `https://your-railway-app.up.railway.app` in the code
+   - Replace `ntt-production.up.railway.app` in the code
    
 2. **Update & Redeploy**
    - I'll help you update the API service with the real Railway URL
