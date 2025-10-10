@@ -223,4 +223,4 @@ async def get_session_info(session_id: str):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main_minimal:app", host="0.0.0.0", port=port, reload=False)

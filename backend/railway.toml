@@ -3,7 +3,7 @@ builder = "nixpacks"
 buildCommand = "pip install --no-cache-dir -r requirements.txt"
 
 [deploy]
-startCommand = "python app/main.py"
+startCommand = "python app/main_minimal.py"
 healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
