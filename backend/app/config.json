@@ -1,7 +1,19 @@
 {
   "gemini": {
     "embedding_model": "models/text-embedding-004",
-    "generation_model": "models/gemini-2.5-flash"
+    "generation_model": "models/gemini-2.5-flash",
+    "available_models": {
+      "embedding": ["models/text-embedding-004", "models/text-embedding-003"],
+      "generation": ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-1.5-pro"]
+    }
+  },
+  "openai": {
+    "embedding_model": "text-embedding-3-small",
+    "generation_model": "gpt-4o-mini",
+    "available_models": {
+      "embedding": ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
+      "generation": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]
+    }
   },
   "local_llm": {
     "path": null,
