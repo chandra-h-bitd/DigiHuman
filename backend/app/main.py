@@ -766,13 +766,21 @@ async def upload(
     if not session_id:
         session_id = str(uuid.uuid4())
 
-    if ext == ".pdf":
-        text = parse_pdf(content)
-    else:
-        text = parse_docx(content)
+    try:
+        if ext == ".pdf":
+            text = parse_pdf(content)
+        else:
+            text = parse_docx(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
 
     text = normalize_text(text)
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="File appears to be empty or could not extract text")
+    
     chunks = smart_chunk(text, filename)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Could not create text chunks from document")
 
     # Embeddings: try provider first, fallback to SBERT
     used_fallback = False
@@ -801,10 +809,14 @@ async def upload(
         vecs = embed_with_openai(texts, api_key, emb_model)
     
     if vecs is None:
-        vecs = embed_with_sbert(texts)
-        used_fallback = True
-        embed_provider = "sbert"
-        logger.info(f"/upload: fallback embeddings used (SBERT)")
+        try:
+            vecs = embed_with_sbert(texts)
+            used_fallback = True
+            embed_provider = "sbert"
+            logger.info(f"/upload: fallback embeddings used (SBERT)")
+        except Exception as e:
+            logger.error(f"/upload: SBERT embedding failed: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate embeddings")
     else:
         embed_provider = provider
         logger.info(f"/upload: embeddings via {provider} model={emb_model}")
