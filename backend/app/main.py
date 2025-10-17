@@ -36,7 +36,7 @@ except LookupError:
     except Exception:
         pass
 
-app = FastAPI(title="Doc Q&A (Gemini + SBERT Fallback)")
+app = FastAPI(title="Finquest Q&A (Gemini + SBERT Fallback)")
 
 # Basic logging setup (no secrets)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
