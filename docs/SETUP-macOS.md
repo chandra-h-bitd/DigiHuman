@@ -1,6 +1,6 @@
 # Setup Guide (macOS)
 
-This guide assumes a fresh macOS install with no developer tools. It’ll get you from zero to a running Doc Q&A app.
+This guide assumes a fresh macOS install with no developer tools. It’ll get you from zero to a running Finquest Q&A app.
 
 ## 1) Install prerequisites
 

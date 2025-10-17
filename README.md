@@ -26,6 +26,9 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python app/main.py
+
+
+/Users/prashant/Downloads/CodeBase/NTT/backend/venv/bin/python3 -m app.main
 ```
 
 Frontend:
