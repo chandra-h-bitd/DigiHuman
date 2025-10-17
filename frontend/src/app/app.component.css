@@ -33,11 +33,18 @@
 .helper { color: var(--muted); font-size: 12px; margin-top: 6px; }
 
 .input-row { display: grid; grid-template-columns: 1fr 36px 90px; gap: 8px; width: 100%; align-items: center; }
+.input-row:has(.full-width) { grid-template-columns: 1fr; }
 .input { height: 36px; border: 1px solid var(--border); border-radius: 6px; padding: 0 10px; font-size: 14px; }
 .btn { height: 36px; border-radius: 6px; border: 1px solid var(--primary); color: var(--primary); background: #fff; padding: 0 8px; cursor: pointer; max-width: 100%; white-space: nowrap; }
 .btn:disabled { opacity: .6; cursor: default; }
 .icon-btn { height: 36px; width: 36px; border: 1px solid var(--border); border-radius: 6px; background: #fff; display: grid; place-items: center; cursor: pointer; }
 .input, .icon-btn, .btn { min-width: 0; }
+
+/* Model selection styles */
+.model-selection { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.full-width { width: 100%; }
+.full-width .mat-mdc-form-field { width: 100%; }
+.full-width .mat-mdc-select { width: 100%; }
 
 .dropzone { border: 2px dashed var(--border); border-radius: 8px; padding: 16px; text-align: center; color: #475569; cursor: pointer; transition: all 300ms ease; }
 .dropzone.drag-over, .dropzone:hover { border-color: var(--primary); background: #F5F7FF; }

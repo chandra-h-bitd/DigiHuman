@@ -36,7 +36,7 @@ except LookupError:
     except Exception:
         pass
 
-app = FastAPI(title="Finquest Q&A (Gemini + SBERT Fallback)")
+app = FastAPI(title="Finquest Q&A (Multi-LLM Support)")
 
 # Basic logging setup (no secrets)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
@@ -85,13 +85,33 @@ try:
 except Exception as _e:
     logger.info(f"Config load failed: {_e}")
 
+# Provider configurations
+def get_provider_config(provider: str) -> Dict[str, Any]:
+    """Get configuration for a specific provider"""
+    return _CONFIG.get(provider, {})
+
+def get_available_models(provider: str) -> Dict[str, List[str]]:
+    """Get available models for a provider"""
+    config = get_provider_config(provider)
+    return config.get("available_models", {"embedding": [], "generation": []})
+
+# Default models for each provider
 DEFAULT_GEMINI_EMBED = os.environ.get(
     "GEMINI_EMBED_MODEL",
-    ((_CONFIG.get("gemini") or {}).get("embedding_model") or "models/text-embedding-004"),
+    get_provider_config("gemini").get("embedding_model", "models/text-embedding-004"),
 )
 DEFAULT_GEMINI_GEN = os.environ.get(
     "GEMINI_GEN_MODEL",
-    ((_CONFIG.get("gemini") or {}).get("generation_model") or "models/gemini-2.5-flash"),
+    get_provider_config("gemini").get("generation_model", "models/gemini-2.5-flash"),
+)
+
+DEFAULT_OPENAI_EMBED = os.environ.get(
+    "OPENAI_EMBED_MODEL",
+    get_provider_config("openai").get("embedding_model", "text-embedding-3-small"),
+)
+DEFAULT_OPENAI_GEN = os.environ.get(
+    "OPENAI_GEN_MODEL",
+    get_provider_config("openai").get("generation_model", "gpt-4o-mini"),
 )
 
 # Local SBERT model (lazy loaded)
@@ -197,7 +217,10 @@ class AskRequest(BaseModel):
     session_id: str
     question: str
     k: int = 5
-    gemini_api_key: Optional[str] = None
+    provider: str = "gemini"  # "gemini" or "openai"
+    api_key: Optional[str] = None
+    embedding_model: Optional[str] = None
+    generation_model: Optional[str] = None
 
 class AskResponse(BaseModel):
     answer: str
@@ -209,9 +232,18 @@ class AskResponse(BaseModel):
     embedding_model: Optional[str]
 
 class ModelsResponse(BaseModel):
+    provider: str
     embedding_model: Optional[str]
     generation_model: Optional[str]
-    available_models: List[str]
+    available_models: Dict[str, List[str]]
+    api_valid: bool
+    error_message: Optional[str] = None
+
+class ProviderValidationRequest(BaseModel):
+    provider: str
+    api_key: str
+    embedding_model: Optional[str] = None
+    generation_model: Optional[str] = None
 
 # ---------- Utils ----------
 
@@ -308,15 +340,48 @@ def parse_docx(file_bytes: bytes) -> str:
 
 # ---------- Embeddings ----------
 
-def get_gemini_models(api_key: str) -> Dict[str, Any]:
-    # Simplified: with a key, use hardcoded defaults; otherwise, none.
+def get_provider_models(provider: str, api_key: str) -> Dict[str, Any]:
+    """Get models and validate API key for a provider"""
     if not api_key:
-        return {"embedding_model": None, "generation_model": None, "available_models": []}
-    return {
-        "embedding_model": DEFAULT_GEMINI_EMBED,
-        "generation_model": DEFAULT_GEMINI_GEN,
-        "available_models": [DEFAULT_GEMINI_EMBED, DEFAULT_GEMINI_GEN],
-    }
+        return {
+            "provider": provider,
+            "embedding_model": None, 
+            "generation_model": None, 
+            "available_models": {"embedding": [], "generation": []},
+            "api_valid": False,
+            "error_message": "No API key provided"
+        }
+    
+    config = get_provider_config(provider)
+    available_models = get_available_models(provider)
+    
+    if provider == "gemini":
+        return {
+            "provider": provider,
+            "embedding_model": config.get("embedding_model", DEFAULT_GEMINI_EMBED),
+            "generation_model": config.get("generation_model", DEFAULT_GEMINI_GEN),
+            "available_models": available_models,
+            "api_valid": True,
+            "error_message": None
+        }
+    elif provider == "openai":
+        return {
+            "provider": provider,
+            "embedding_model": config.get("embedding_model", DEFAULT_OPENAI_EMBED),
+            "generation_model": config.get("generation_model", DEFAULT_OPENAI_GEN),
+            "available_models": available_models,
+            "api_valid": True,
+            "error_message": None
+        }
+    else:
+        return {
+            "provider": provider,
+            "embedding_model": None,
+            "generation_model": None,
+            "available_models": {"embedding": [], "generation": []},
+            "api_valid": False,
+            "error_message": f"Unsupported provider: {provider}"
+        }
 
 
 def _model_path(name: str) -> str:
@@ -349,6 +414,40 @@ def embed_with_gemini(texts: List[str], api_key: str, model_name: Optional[str])
         return np.vstack(vectors)
     except Exception as e:
         logger.warning(f"Gemini embed exception: {e}")
+        return None
+
+
+def embed_with_openai(texts: List[str], api_key: str, model_name: Optional[str]) -> Optional[np.ndarray]:
+    """Generate embeddings using OpenAI API"""
+    if not api_key or not model_name:
+        return None
+    
+    url = "https://api.openai.com/v1/embeddings"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    vectors = []
+    try:
+        for text in texts:
+            payload = {
+                "model": model_name,
+                "input": text
+            }
+            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            if not r.ok:
+                logger.warning(f"OpenAI embed error status={r.status_code} body={r.text[:200]}")
+                r.raise_for_status()
+            data = r.json()
+            vec = data.get("data", [{}])[0].get("embedding")
+            if not vec:
+                logger.warning("OpenAI embed returned no vector values")
+                return None
+            vectors.append(np.array(vec, dtype=np.float32))
+        return np.vstack(vectors)
+    except Exception as e:
+        logger.warning(f"OpenAI embed exception: {e}")
         return None
 
 
@@ -391,6 +490,43 @@ def generate_with_gemini(prompt: str, api_key: str, model_name: Optional[str]) -
         return out.strip() or None
     except Exception as e:
         logger.warning(f"Gemini generate exception: {e}")
+        return None
+
+
+def generate_with_openai(prompt: str, api_key: str, model_name: Optional[str]) -> Optional[str]:
+    """Generate text using OpenAI API"""
+    if not api_key or not model_name:
+        return None
+    
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 512
+    }
+    
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        if not r.ok:
+            logger.warning(f"OpenAI generate error status={r.status_code} body={r.text[:200]}")
+            r.raise_for_status()
+        data = r.json()
+        choices = data.get("choices", [])
+        if not choices:
+            logger.warning("OpenAI generate returned no choices")
+            return None
+        content = choices[0].get("message", {}).get("content", "")
+        return content.strip() or None
+    except Exception as e:
+        logger.warning(f"OpenAI generate exception: {e}")
         return None
 
 
@@ -532,9 +668,90 @@ def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
     return answer.strip()
 
 
+# ---------- API Validation ----------
+
+def validate_api_key(provider: str, api_key: str, embedding_model: Optional[str] = None, generation_model: Optional[str] = None) -> Dict[str, Any]:
+    """Validate API key by making test calls to the provider"""
+    if not api_key:
+        return {
+            "valid": False,
+            "error": "No API key provided"
+        }
+    
+    try:
+        if provider == "gemini":
+            # Test embedding call
+            test_embed_model = embedding_model or DEFAULT_GEMINI_EMBED
+            test_vec = embed_with_gemini(["test"], api_key, test_embed_model)
+            if test_vec is None:
+                return {
+                    "valid": False,
+                    "error": "Failed to generate embeddings with provided key"
+                }
+            
+            # Test generation call
+            test_gen_model = generation_model or DEFAULT_GEMINI_GEN
+            test_response = generate_with_gemini("Hello", api_key, test_gen_model)
+            if test_response is None:
+                return {
+                    "valid": False,
+                    "error": "Failed to generate text with provided key"
+                }
+            
+            return {
+                "valid": True,
+                "error": None,
+                "embedding_model": test_embed_model,
+                "generation_model": test_gen_model
+            }
+            
+        elif provider == "openai":
+            # Test embedding call
+            test_embed_model = embedding_model or DEFAULT_OPENAI_EMBED
+            test_vec = embed_with_openai(["test"], api_key, test_embed_model)
+            if test_vec is None:
+                return {
+                    "valid": False,
+                    "error": "Failed to generate embeddings with provided key"
+                }
+            
+            # Test generation call
+            test_gen_model = generation_model or DEFAULT_OPENAI_GEN
+            test_response = generate_with_openai("Hello", api_key, test_gen_model)
+            if test_response is None:
+                return {
+                    "valid": False,
+                    "error": "Failed to generate text with provided key"
+                }
+            
+            return {
+                "valid": True,
+                "error": None,
+                "embedding_model": test_embed_model,
+                "generation_model": test_gen_model
+            }
+        else:
+            return {
+                "valid": False,
+                "error": f"Unsupported provider: {provider}"
+            }
+    except Exception as e:
+        return {
+            "valid": False,
+            "error": f"Validation error: {str(e)}"
+        }
+
+
 # ---------- API ----------
 @app.post("/upload", response_model=UploadResponse)
-async def upload(file: UploadFile = File(...), session_id: Optional[str] = Form(None), gemini_api_key: Optional[str] = Form(None)):
+async def upload(
+    file: UploadFile = File(...), 
+    session_id: Optional[str] = Form(None), 
+    provider: str = Form("gemini"),
+    api_key: Optional[str] = Form(None),
+    embedding_model: Optional[str] = Form(None),
+    generation_model: Optional[str] = Form(None)
+):
     try:
         content = await file.read()
     except Exception as e:
@@ -557,31 +774,46 @@ async def upload(file: UploadFile = File(...), session_id: Optional[str] = Form(
     text = normalize_text(text)
     chunks = smart_chunk(text, filename)
 
-    # Embeddings: try Gemini first
+    # Embeddings: try provider first, fallback to SBERT
     used_fallback = False
-    if gemini_api_key:
-        # Hardcode embedding model when key is present
-        gem_models = {"embedding_model": DEFAULT_GEMINI_EMBED, "generation_model": DEFAULT_GEMINI_GEN}
-        emb_model = DEFAULT_GEMINI_EMBED
+    provider_config = get_provider_config(provider)
+    
+    if api_key and provider in ["gemini", "openai"]:
+        # Use provider-specific embedding model
+        if provider == "gemini":
+            emb_model = embedding_model or provider_config.get("embedding_model", DEFAULT_GEMINI_EMBED)
+            gen_model = generation_model or provider_config.get("generation_model", DEFAULT_GEMINI_GEN)
+        else:  # openai
+            emb_model = embedding_model or provider_config.get("embedding_model", DEFAULT_OPENAI_EMBED)
+            gen_model = generation_model or provider_config.get("generation_model", DEFAULT_OPENAI_GEN)
     else:
-        gem_models = {"embedding_model": None, "generation_model": None}
         emb_model = None
+        gen_model = None
 
     texts = [c["text"] for c in chunks]
-    logger.info(f"/upload: session={session_id} file={filename} key_provided={bool(gemini_api_key)} emb_model={emb_model}")
-    vecs = embed_with_gemini(texts, gemini_api_key, emb_model)
+    logger.info(f"/upload: session={session_id} file={filename} provider={provider} key_provided={bool(api_key)} emb_model={emb_model}")
+    
+    # Try provider-specific embedding
+    vecs = None
+    if provider == "gemini" and api_key:
+        vecs = embed_with_gemini(texts, api_key, emb_model)
+    elif provider == "openai" and api_key:
+        vecs = embed_with_openai(texts, api_key, emb_model)
+    
     if vecs is None:
         vecs = embed_with_sbert(texts)
         used_fallback = True
         embed_provider = "sbert"
         logger.info(f"/upload: fallback embeddings used (SBERT)")
     else:
-        embed_provider = "gemini"
-        logger.info(f"/upload: embeddings via Gemini model={emb_model}")
+        embed_provider = provider
+        logger.info(f"/upload: embeddings via {provider} model={emb_model}")
 
     # Determine embedding model name for response/logs
     embedding_model_name: Optional[str] = None
     if embed_provider == "gemini":
+        embedding_model_name = emb_model
+    elif embed_provider == "openai":
         embedding_model_name = emb_model
     else:
         embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
@@ -619,14 +851,18 @@ async def upload(file: UploadFile = File(...), session_id: Optional[str] = Form(
 
     # store session config
     SESSIONS.setdefault(session_id, {})
-    SESSIONS[session_id]["gemini_models"] = gem_models
+    SESSIONS[session_id]["provider"] = provider
+    SESSIONS[session_id]["api_key"] = api_key
+    SESSIONS[session_id]["embedding_model"] = emb_model
+    SESSIONS[session_id]["generation_model"] = gen_model
     session_log(session_id, "upload", {
         "doc": filename,
         "chunks_indexed": len(points),
+        "provider": provider,
         "embed_provider": embed_provider,
         "embedding_model": embedding_model_name,
         "vector_dim": int(vecs.shape[1]) if hasattr(vecs, 'shape') else None,
-        "key_provided": bool(gemini_api_key),
+        "key_provided": bool(api_key),
     })
 
     return UploadResponse(
@@ -647,12 +883,22 @@ async def ask(req: AskRequest):
         raise HTTPException(status_code=400, detail="Missing question")
 
     # retrieve top-k for this session
-    # embed question with available method (prefer Gemini)
-    gem_models = SESSIONS.get(req.session_id, {}).get("gemini_models", {})
-    emb_model = gem_models.get("embedding_model") if gem_models else None
+    # embed question with available method (prefer provider from session or request)
+    session_info = SESSIONS.get(req.session_id, {})
+    session_provider = session_info.get("provider", req.provider)
+    session_api_key = session_info.get("api_key", req.api_key)
+    session_emb_model = session_info.get("embedding_model", req.embedding_model)
+    session_gen_model = session_info.get("generation_model", req.generation_model)
 
-    logger.info(f"/ask: session={req.session_id} key_provided={bool(req.gemini_api_key)} k={req.k} gen_model={(SESSIONS.get(req.session_id, {}).get('gemini_models') or {}).get('generation_model')}")
-    q_vec = embed_with_gemini([req.question], req.gemini_api_key, emb_model)
+    logger.info(f"/ask: session={req.session_id} provider={session_provider} key_provided={bool(session_api_key)} k={req.k}")
+    
+    # Try provider-specific embedding for question
+    q_vec = None
+    if session_provider == "gemini" and session_api_key:
+        q_vec = embed_with_gemini([req.question], session_api_key, session_emb_model)
+    elif session_provider == "openai" and session_api_key:
+        q_vec = embed_with_openai([req.question], session_api_key, session_emb_model)
+    
     used_fallback = False
     if q_vec is None:
         q_vec = embed_with_sbert([req.question])
@@ -660,11 +906,17 @@ async def ask(req: AskRequest):
         embed_provider = "sbert"
         logger.info("/ask: fallback question embedding used (SBERT)")
     else:
-        embed_provider = "gemini"
-        logger.info("/ask: question embedding via Gemini")
+        embed_provider = session_provider
+        logger.info(f"/ask: question embedding via {session_provider}")
 
     # Embedding model name used for the question
-    embedding_model_name: Optional[str] = emb_model if embed_provider == "gemini" else "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model_name: Optional[str] = None
+    if embed_provider == "gemini":
+        embedding_model_name = session_emb_model
+    elif embed_provider == "openai":
+        embedding_model_name = session_emb_model
+    else:
+        embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
 
     coll = collection_name(req.session_id)
     top_chunks = []
@@ -699,17 +951,24 @@ async def ask(req: AskRequest):
     )
     prompt = f"{system_prompt}Context:\n{context}\n\nQuestion: {req.question}\nAnswer:"
 
-    # Force a single, known-good Gemini generation model when key is present
-    if req.gemini_api_key:
-        gen_model = DEFAULT_GEMINI_GEN
-    else:
-        gen_model = None
-
-    gem_attempts: List[str] = []
-    if gen_model:
-        gem_attempts.append(gen_model)
-    answer = generate_with_gemini(prompt, req.gemini_api_key, gen_model)
-    generation_model_name: Optional[str] = gen_model
+    # Try provider-specific generation
+    answer = None
+    generation_model_name: Optional[str] = None
+    gen_provider = "heuristic"  # default fallback
+    
+    if session_provider == "gemini" and session_api_key:
+        answer = generate_with_gemini(prompt, session_api_key, session_gen_model)
+        if answer:
+            gen_provider = "gemini"
+            generation_model_name = session_gen_model
+            logger.info(f"/ask: generation via Gemini model={generation_model_name}")
+    elif session_provider == "openai" and session_api_key:
+        answer = generate_with_openai(prompt, session_api_key, session_gen_model)
+        if answer:
+            gen_provider = "openai"
+            generation_model_name = session_gen_model
+            logger.info(f"/ask: generation via OpenAI model={generation_model_name}")
+    
     if answer is None:
         # Try local LLM first
         local_answer = generate_with_local_llm(req.question, top_chunks)
@@ -726,21 +985,18 @@ async def ask(req: AskRequest):
             gen_provider = "heuristic"
             generation_model_name = None
             logger.info("/ask: fallback generation used (heuristic)")
-    else:
-        gen_provider = "gemini"
-        logger.info(f"/ask: generation via Gemini model={generation_model_name}")
 
     session_log(req.session_id, "ask", {
         "question": req.question,
+        "provider": session_provider,
         "embed_provider": embed_provider,
         "embedding_model": embedding_model_name,
         "gen_provider": gen_provider,
+        "generation_model": generation_model_name,
         "used_fallback": used_fallback,
         "top_k": req.k,
         "returned_sources": len(top_chunks),
-        "gemini_key_provided": bool(req.gemini_api_key),
-        "gemini_attempts": gem_attempts,
-        "gemini_generation_model": generation_model_name if gen_provider == "gemini" else None,
+        "api_key_provided": bool(session_api_key),
     })
 
     return AskResponse(
@@ -755,15 +1011,58 @@ async def ask(req: AskRequest):
 
 
 @app.get("/models", response_model=ModelsResponse)
-async def models(gemini_api_key: Optional[str] = None):
-    if not gemini_api_key:
-        return ModelsResponse(embedding_model=None, generation_model=None, available_models=[])
-    m = get_gemini_models(gemini_api_key)
+async def models(provider: str = "gemini", api_key: Optional[str] = None):
+    """Get available models for a provider"""
+    if not api_key:
+        return ModelsResponse(
+            provider=provider,
+            embedding_model=None, 
+            generation_model=None, 
+            available_models={"embedding": [], "generation": []},
+            api_valid=False,
+            error_message="No API key provided"
+        )
+    
+    m = get_provider_models(provider, api_key)
     return ModelsResponse(
+        provider=m.get("provider", provider),
         embedding_model=m.get("embedding_model"),
         generation_model=m.get("generation_model"),
-        available_models=m.get("available_models", []),
+        available_models=m.get("available_models", {"embedding": [], "generation": []}),
+        api_valid=m.get("api_valid", False),
+        error_message=m.get("error_message")
     )
+
+
+@app.post("/validate", response_model=ModelsResponse)
+async def validate_provider(req: ProviderValidationRequest):
+    """Validate API key and return available models"""
+    validation_result = validate_api_key(
+        req.provider, 
+        req.api_key, 
+        req.embedding_model, 
+        req.generation_model
+    )
+    
+    if validation_result["valid"]:
+        models_info = get_provider_models(req.provider, req.api_key)
+        return ModelsResponse(
+            provider=req.provider,
+            embedding_model=validation_result.get("embedding_model"),
+            generation_model=validation_result.get("generation_model"),
+            available_models=models_info.get("available_models", {"embedding": [], "generation": []}),
+            api_valid=True,
+            error_message=None
+        )
+    else:
+        return ModelsResponse(
+            provider=req.provider,
+            embedding_model=None,
+            generation_model=None,
+            available_models={"embedding": [], "generation": []},
+            api_valid=False,
+            error_message=validation_result.get("error", "Validation failed")
+        )
 
 
 @app.get("/health")
@@ -797,7 +1096,9 @@ async def session_diagnostics(session_id: str):
         vec_count = 0
     return {
         "session_id": session_id,
-        "gemini_models": info.get("gemini_models"),
+        "provider": info.get("provider"),
+        "embedding_model": info.get("embedding_model"),
+        "generation_model": info.get("generation_model"),
         "vector_count": vec_count,
     }
 

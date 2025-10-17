@@ -10,9 +10,11 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSelectModule } from '@angular/material/select';
+import { MatFormFieldModule } from '@angular/material/form-field';
 import { TextFieldModule } from '@angular/cdk/text-field';
 import { HttpEventType } from '@angular/common/http';
-import { ApiService } from './api.service';
+import { ApiService, ProviderConfig, ModelsResponse } from './api.service';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 
 interface ChatMessage {
@@ -26,7 +28,7 @@ interface ChatMessage {
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatInputModule, MatButtonModule, MatIconModule, MatProgressBarModule, MatCardModule, MatChipsModule, MatSnackBarModule, MatTooltipModule, MatProgressSpinnerModule, TextFieldModule],
+  imports: [CommonModule, FormsModule, MatInputModule, MatButtonModule, MatIconModule, MatProgressBarModule, MatCardModule, MatChipsModule, MatSnackBarModule, MatTooltipModule, MatProgressSpinnerModule, MatSelectModule, MatFormFieldModule, TextFieldModule],
   templateUrl: './app.component.html',
   styleUrls: ['./app.component.css']
 })
@@ -34,14 +36,20 @@ export class AppComponent {
   title = 'Document Q&A';
   backendUrl = 'http://localhost:8000';
 
-  geminiKey = '';
-  sessionId = '';
+  // Provider configuration
+  selectedProvider: string = 'gemini';
+  apiKey = '';
   keyVisible = false;
   keyStatus: 'not_configured' | 'checking' | 'valid' | 'invalid' = 'not_configured';
-  embeddingModel?: string;
-  generationModel?: string;
-  availableModels: string[] = [];
+  
+  // Model selection
+  selectedEmbeddingModel?: string;
+  selectedGenerationModel?: string;
+  availableModels: ModelsResponse['available_models'] = { embedding: [], generation: [] };
+  
+  // UI state
   apiCollapsed = false;
+  sessionId = '';
 
   uploadProgress = 0;
   embeddingFallback = false;
@@ -66,8 +74,21 @@ export class AppComponent {
 
   constructor(private api: ApiService, private snack: MatSnackBar, private sanitizer: DomSanitizer) {}
 
-  updateKey(key: string) {
-    this.geminiKey = key;
+  get currentProviderConfig(): ProviderConfig {
+    return {
+      provider: this.selectedProvider,
+      apiKey: this.apiKey,
+      embeddingModel: this.selectedEmbeddingModel,
+      generationModel: this.selectedGenerationModel
+    };
+  }
+
+  onProviderChange() {
+    // Reset models when provider changes
+    this.selectedEmbeddingModel = undefined;
+    this.selectedGenerationModel = undefined;
+    this.availableModels = { embedding: [], generation: [] };
+    this.keyStatus = 'not_configured';
   }
 
   async uploadFile(event: any) {
@@ -83,16 +104,11 @@ export class AppComponent {
       return;
     }
 
-    const form = new FormData();
-    form.append('file', file);
-    if (this.sessionId) form.append('session_id', this.sessionId);
-    if (this.geminiKey) form.append('gemini_api_key', this.geminiKey);
-
     this.uploading = true;
     this.uploadProgress = 0;
     this.uploadedFile = { name: file.name, size: file.size };
 
-    this.api.upload(file, this.sessionId, this.geminiKey)
+    this.api.upload(file, this.sessionId, this.currentProviderConfig)
       .subscribe({
         next: (event: any) => {
           if (event.type === HttpEventType.UploadProgress) {
@@ -121,8 +137,7 @@ export class AppComponent {
     this.messages.push({ role: 'user', text: q, ts: new Date() });
     this.answering = true;
 
-    const body = { session_id: this.sessionId, question: q, k: 5, gemini_api_key: this.geminiKey || null };
-    this.api.ask(this.sessionId, q, this.geminiKey).subscribe({
+    this.api.ask(this.sessionId, q, this.currentProviderConfig).subscribe({
       next: (data: any) => {
         this.messages.push({ role: 'assistant', text: data.answer, sources: data.sources, fallback: data.used_fallback, ts: new Date() });
         this.question = '';
@@ -140,31 +155,28 @@ export class AppComponent {
     });
   }
 
-  getModels() {
-    const params: any = {};
-    if (this.geminiKey) params.gemini_api_key = this.geminiKey;
-    this.api.models(this.geminiKey).subscribe(console.log);
-  }
-
   validateKey() {
-    if (!this.geminiKey) {
+    if (!this.apiKey) {
       this.keyStatus = 'not_configured';
       this.snack.open('Please enter an API key to validate.', 'Dismiss', { duration: 2500 });
       return;
     }
+    
     this.keyStatus = 'checking';
-    this.api.models(this.geminiKey).subscribe({
-      next: (res: any) => {
-        this.embeddingModel = res.embedding_model || undefined;
-        this.generationModel = res.generation_model || undefined;
-        this.availableModels = res.available_models || [];
-        if (this.generationModel || this.embeddingModel) {
+    
+    // Use the new validation endpoint
+    this.api.validateProvider(this.currentProviderConfig).subscribe({
+      next: (res: ModelsResponse) => {
+        if (res.api_valid) {
+          this.selectedEmbeddingModel = res.embedding_model;
+          this.selectedGenerationModel = res.generation_model;
+          this.availableModels = res.available_models;
           this.keyStatus = 'valid';
-          this.snack.open('Connected to Gemini.', 'OK', { duration: 2000 });
+          this.snack.open(`Connected to ${this.selectedProvider.toUpperCase()}.`, 'OK', { duration: 2000 });
           this.apiCollapsed = true;
         } else {
           this.keyStatus = 'invalid';
-          this.snack.open('Key seems invalid or lacks access to models.', 'Dismiss', { duration: 3000 });
+          this.snack.open(res.error_message || 'Key seems invalid or lacks access to models.', 'Dismiss', { duration: 3000 });
         }
       },
       error: (err) => {

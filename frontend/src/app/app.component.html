@@ -20,11 +20,45 @@
         <div class="status-badge" [class.ok]="keyStatus==='valid'">{{ keyStatus==='valid' ? 'Connected' : 'Not configured' }}</div>
       </div>
       <div class="section-body" *ngIf="!apiCollapsed">
+        <!-- Provider Selection -->
         <div class="input-row">
-          <input class="input" [type]="keyVisible ? 'text' : 'password'" [(ngModel)]="geminiKey" placeholder="Gemini API key" aria-label="Gemini API key">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Provider</mat-label>
+            <mat-select [(ngModel)]="selectedProvider" (selectionChange)="onProviderChange()">
+              <mat-option value="gemini">Google Gemini</mat-option>
+              <mat-option value="openai">OpenAI</mat-option>
+            </mat-select>
+          </mat-form-field>
+        </div>
+        
+        <!-- API Key -->
+        <div class="input-row">
+          <input class="input" [type]="keyVisible ? 'text' : 'password'" [(ngModel)]="apiKey" [placeholder]="selectedProvider === 'gemini' ? 'Gemini API key' : 'OpenAI API key'" aria-label="API key">
           <button class="icon-btn" (click)="keyVisible=!keyVisible" [attr.aria-label]="keyVisible ? 'Hide key' : 'Show key'"><mat-icon>{{ keyVisible ? 'visibility_off' : 'visibility' }}</mat-icon></button>
           <button class="btn" (click)="validateKey()" [disabled]="keyStatus==='checking'">{{ keyStatus==='checking' ? 'Checking…' : 'Validate' }}</button>
         </div>
+        
+        <!-- Model Selection (shown after validation) -->
+        <div *ngIf="keyStatus==='valid' && availableModels.embedding.length > 0" class="model-selection">
+          <div class="input-row">
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Embedding Model</mat-label>
+              <mat-select [(ngModel)]="selectedEmbeddingModel">
+                <mat-option *ngFor="let model of availableModels.embedding" [value]="model">{{ model }}</mat-option>
+              </mat-select>
+            </mat-form-field>
+          </div>
+          
+          <div class="input-row">
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Generation Model</mat-label>
+              <mat-select [(ngModel)]="selectedGenerationModel">
+                <mat-option *ngFor="let model of availableModels.generation" [value]="model">{{ model }}</mat-option>
+              </mat-select>
+            </mat-form-field>
+          </div>
+        </div>
+        
         <div class="helper">Key is only used in this browser and sent per request; it is not stored.</div>
       </div>
     </section>
