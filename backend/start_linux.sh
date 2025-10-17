@@ -27,6 +27,18 @@ pip install -r requirements.txt
 echo "🔧 Updating huggingface-hub for compatibility..."
 pip install --upgrade huggingface-hub
 
+# Install local LLM models (optional but recommended)
+echo "🤖 Installing local LLM models for fallback..."
+echo "💡 This will download ~4-8GB of models for offline use"
+echo "❓ Install local LLM models? (y/N): "
+read -r install_llm
+if [[ $install_llm =~ ^[Yy]$ ]]; then
+    python install_local_llm.py
+else
+    echo "⏭️ Skipping local LLM installation"
+    echo "💡 You can run 'python install_local_llm.py' later to install them"
+fi
+
 # Start the application
 echo "🚀 Starting backend server..."
 echo

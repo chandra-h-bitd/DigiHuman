@@ -174,9 +174,12 @@ def get_local_llm():
         except Exception as e:
             logger.info(f"Failed to load local LLM from LOCAL_LLM_PATH={explicit_path}: {e}")
 
-    # 2) Prefer bundled GGUF(s)
+    # 2) Prefer bundled GGUF(s) - updated with best available models
     preferred = [
-        "orca-mini-3b-gguf2-q4_0.gguf",
+        "mistral-7b-openorca.gguf2.Q4_0.gguf",  # Best overall fast chat model
+        "mistral-7b-instruct-v0.1.Q4_0.gguf",   # Best instruction following model
+        "orca-mini-3b-gguf2-q4_0.gguf",         # Small but good model
+        "gpt4all-falcon-newbpe-q4_0.gguf",      # Fast model with good quality
     ]
     chosen_name: Optional[str] = None
     for nm in preferred:
@@ -197,39 +200,40 @@ def get_local_llm():
         try:
             _local_llm = GPT4All(chosen_name, model_path=models_dir)
             _local_llm_name = chosen_name
-            logger.info(f"Local LLM loaded: {chosen_name} (dir={models_dir})")
+            logger.info(f"✅ Local LLM loaded: {chosen_name} (dir={models_dir})")
             return _local_llm
         except Exception as e:
+            logger.warning(f"⚠️ Failed to load bundled model {chosen_name}: {e}")
             logger.info(f"Failed to load bundled local LLM '{chosen_name}': {e}")
 
-    # 3) Fallback to named models (may download on first use)
-    model_name = os.environ.get("LOCAL_LLM_MODEL") or cfg_local.get("model") or "ggml-gpt4all-j-v1.3-groovy"
+    # 3) Fallback to named models (may download on first use) - updated with working models
+    fallback_models = [
+        "mistral-7b-openorca.gguf2.Q4_0.gguf",  # Best overall fast chat model
+        "mistral-7b-instruct-v0.1.Q4_0.gguf",   # Best instruction following model  
+        "orca-mini-3b-gguf2-q4_0.gguf",         # Small but good model
+        "gpt4all-falcon-newbpe-q4_0.gguf",      # Fast model with good quality
+    ]
     
-    # Try to download and load the model
-    try:
-        logger.info(f"🔄 Attempting to download local LLM: {model_name}")
-        logger.info("📥 This may take a few minutes on first run...")
-        
-        _local_llm = GPT4All(model_name, model_path=models_dir)
-        _local_llm_name = model_name
-        logger.info(f"✅ Local LLM successfully loaded: {model_name} (dir={models_dir})")
-        return _local_llm
-        
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to download/load local LLM '{model_name}': {e}")
-        
-        # Try a smaller, more reliable model as final fallback
+    # Try each fallback model in order
+    for model_name in fallback_models:
         try:
-            fallback_model = "ggml-gpt4all-j-v1.3-groovy"
-            logger.info(f"🔄 Trying fallback model: {fallback_model}")
-            _local_llm = GPT4All(fallback_model, model_path=models_dir)
-            _local_llm_name = fallback_model
-            logger.info(f"✅ Fallback local LLM loaded: {fallback_model}")
+            logger.info(f"🔄 Attempting to download local LLM: {model_name}")
+            logger.info("📥 This may take a few minutes on first run...")
+            
+            _local_llm = GPT4All(model_name, model_path=models_dir)
+            _local_llm_name = model_name
+            logger.info(f"✅ Local LLM successfully loaded: {model_name} (dir={models_dir})")
             return _local_llm
-        except Exception as e2:
-            logger.warning(f"⚠️ Fallback local LLM also failed: {e2}")
-            logger.info("ℹ️ System will continue without local LLM - using cloud providers only")
-            return None
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to download/load local LLM '{model_name}': {e}")
+            continue
+    
+    # If all models fail, suggest running the installation script
+    logger.warning("⚠️ All local LLM models failed to load")
+    logger.info("💡 Run 'python install_local_llm.py' to install local models")
+    logger.info("ℹ️ System will continue without local LLM - using cloud providers only")
+    return None
 
 # ---------- Models ----------
 class UploadResponse(BaseModel):
