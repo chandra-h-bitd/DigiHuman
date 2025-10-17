@@ -120,12 +120,21 @@ _local_llm = None   # lazy-loaded GPT4All model instance
 _local_llm_name: Optional[str] = None  # selected local model name for diagnostics
 
 def get_sbert():
+    """Lazy-load SBERT model for embeddings with improved error handling."""
     global _sbert_model
-    if _sbert_model is None:
-        # Lazy import to avoid heavy startup cost
+    if _sbert_model is not None:
+        return _sbert_model
+    
+    try:
+        logger.info("🔄 Loading SBERT model for fallback embeddings...")
         from sentence_transformers import SentenceTransformer
         _sbert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    return _sbert_model
+        logger.info("✅ SBERT model loaded successfully")
+        return _sbert_model
+    except Exception as e:
+        logger.error(f"❌ Failed to load SBERT model: {e}")
+        logger.info("ℹ️ System will continue without SBERT fallback")
+        return None
 
 def get_local_llm():
     """Lazy-load a local LLM via GPT4All, preferring an on-disk GGUF before any downloads.
@@ -195,14 +204,32 @@ def get_local_llm():
 
     # 3) Fallback to named models (may download on first use)
     model_name = os.environ.get("LOCAL_LLM_MODEL") or cfg_local.get("model") or "ggml-gpt4all-j-v1.3-groovy"
+    
+    # Try to download and load the model
     try:
+        logger.info(f"🔄 Attempting to download local LLM: {model_name}")
+        logger.info("📥 This may take a few minutes on first run...")
+        
         _local_llm = GPT4All(model_name, model_path=models_dir)
         _local_llm_name = model_name
-        logger.info(f"Local LLM loaded by name: {model_name} (dir={models_dir})")
+        logger.info(f"✅ Local LLM successfully loaded: {model_name} (dir={models_dir})")
         return _local_llm
+        
     except Exception as e:
-        logger.info(f"Local LLM unavailable (failed to load '{model_name}'): {e}")
-        return None
+        logger.warning(f"⚠️ Failed to download/load local LLM '{model_name}': {e}")
+        
+        # Try a smaller, more reliable model as final fallback
+        try:
+            fallback_model = "ggml-gpt4all-j-v1.3-groovy"
+            logger.info(f"🔄 Trying fallback model: {fallback_model}")
+            _local_llm = GPT4All(fallback_model, model_path=models_dir)
+            _local_llm_name = fallback_model
+            logger.info(f"✅ Fallback local LLM loaded: {fallback_model}")
+            return _local_llm
+        except Exception as e2:
+            logger.warning(f"⚠️ Fallback local LLM also failed: {e2}")
+            logger.info("ℹ️ System will continue without local LLM - using cloud providers only")
+            return None
 
 # ---------- Models ----------
 class UploadResponse(BaseModel):
@@ -451,9 +478,19 @@ def embed_with_openai(texts: List[str], api_key: str, model_name: Optional[str])
         return None
 
 
-def embed_with_sbert(texts: List[str]) -> np.ndarray:
+def embed_with_sbert(texts: List[str]) -> Optional[np.ndarray]:
+    """Generate embeddings using SBERT with error handling."""
     model = get_sbert()
-    return np.array(model.encode(texts, normalize_embeddings=True), dtype=np.float32)
+    if model is None:
+        logger.error("SBERT model not available for embedding")
+        return None
+    
+    try:
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        return np.array(embeddings, dtype=np.float32)
+    except Exception as e:
+        logger.error(f"SBERT embedding failed: {e}")
+        return None
 
 
 # ---------- Generation ----------
@@ -809,14 +846,19 @@ async def upload(
         vecs = embed_with_openai(texts, api_key, emb_model)
     
     if vecs is None:
-        try:
-            vecs = embed_with_sbert(texts)
+        # Try SBERT fallback
+        vecs = embed_with_sbert(texts)
+        if vecs is not None:
             used_fallback = True
             embed_provider = "sbert"
             logger.info(f"/upload: fallback embeddings used (SBERT)")
-        except Exception as e:
-            logger.error(f"/upload: SBERT embedding failed: {e}")
-            raise HTTPException(status_code=500, detail="Failed to generate embeddings")
+        else:
+            # If SBERT also fails, provide a helpful error message
+            logger.error("/upload: Both primary and SBERT embeddings failed")
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to generate embeddings. Please check your API key or try again later. If the issue persists, the embedding service may be temporarily unavailable."
+            )
     else:
         embed_provider = provider
         logger.info(f"/upload: embeddings via {provider} model={emb_model}")
@@ -913,10 +955,19 @@ async def ask(req: AskRequest):
     
     used_fallback = False
     if q_vec is None:
+        # Try SBERT fallback
         q_vec = embed_with_sbert([req.question])
-        used_fallback = True
-        embed_provider = "sbert"
-        logger.info("/ask: fallback question embedding used (SBERT)")
+        if q_vec is not None:
+            used_fallback = True
+            embed_provider = "sbert"
+            logger.info("/ask: fallback question embedding used (SBERT)")
+        else:
+            # If SBERT also fails, provide a helpful error message
+            logger.error("/ask: Both primary and SBERT embeddings failed")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate question embeddings. Please check your API key or try again later."
+            )
     else:
         embed_provider = session_provider
         logger.info(f"/ask: question embedding via {session_provider}")
@@ -1124,4 +1175,24 @@ async def session_events(session_id: str, limit: int = 50):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+
+# Optimized components (conditional imports to avoid errors)
+try:
+    from .cleaned_endpoints import router as optimized_router
+    from .optimized_providers import OptimizedGeminiProvider, OptimizedOpenAIProvider, ProviderConfig
+    from .optimized_fallback import fallback_manager, enhanced_local_llm
+    from .data_flow_optimizer import data_optimizer
+    OPTIMIZED_COMPONENTS_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Optimized components not available: {e}")
+    OPTIMIZED_COMPONENTS_AVAILABLE = False
+
+# Include optimized endpoints if available
+if OPTIMIZED_COMPONENTS_AVAILABLE:
+    app.include_router(optimized_router)
+    logger.info("✅ Optimized endpoints loaded")
+else:
+    logger.info("ℹ️ Using standard endpoints only")
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
