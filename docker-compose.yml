@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  # Frontend (Angular)
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "4200:80"
+    depends_on:
+      - backend
+    environment:
+      - BACKEND_URL=http://backend:8000
+    networks:
+      - docqa-network
+
+  # Backend (FastAPI)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - qdrant
+      - postgres
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - QDRANT_URL=http://qdrant:6333
+      - DATABASE_URL=postgresql://docqa_user:docqa_password@postgres:5432/docqa
+      - ENVIRONMENT=production
+    volumes:
+      - ./backend/app/models:/app/models
+      - ./production_storage:/app/storage
+    networks:
+      - docqa-network
+
+  # Vector Database (Qdrant)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - docqa-network
+
+  # Caching & Session Store (Redis)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - docqa-network
+
+  # Persistent Database (PostgreSQL)
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=docqa
+      - POSTGRES_USER=docqa_user
+      - POSTGRES_PASSWORD=docqa_password
+    networks:
+      - docqa-network
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - docqa-network
+
+volumes:
+  qdrant_data:
+  redis_data:
+  postgres_data:
+
+networks:
+  docqa-network:
+    driver: bridge

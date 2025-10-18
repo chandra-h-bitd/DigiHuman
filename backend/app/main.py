@@ -24,17 +24,19 @@ import requests
 import json as _json
 
 # Ensure punkt + punkt_tab for NLTK 3.9
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-try:
-    nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
-    try:
-        nltk.download('punkt_tab')
-    except Exception:
-        pass
+# NLTK setup (handled in Dockerfile)
+# try:
+#     nltk.data.find('tokenizers/punkt')
+# except LookupError:
+#     nltk.download('punkt')
+# NLTK punkt_tab setup (handled in Dockerfile)
+# try:
+#     nltk.data.find('tokenizers/punkt_tab')
+# except LookupError:
+#     try:
+#         nltk.download('punkt_tab')
+#     except Exception:
+#         pass
 
 app = FastAPI(title="Finquest Q&A (Multi-LLM Support)")
 
@@ -53,15 +55,58 @@ app.add_middleware(
 # In-memory state per session key (a simple session id sent from frontend)
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
-# Qdrant in-memory client
-qdrant = QdrantClient(path=":memory:")
+# Try to import persistent storage, fallback to in-memory if not available
+try:
+    from .persistent_storage import storage
+    PERSISTENT_STORAGE_AVAILABLE = True
+    logger.info("✅ Persistent storage available")
+except ImportError as e:
+    logger.warning(f"⚠️ Persistent storage not available: {e}")
+    PERSISTENT_STORAGE_AVAILABLE = False
+    storage = None
+
+# Initialize persistent storage on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize persistent storage on startup"""
+    if PERSISTENT_STORAGE_AVAILABLE and storage:
+        try:
+            await storage.initialize()
+            logger.info("🚀 Application startup complete with persistent storage")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize persistent storage: {e}")
+            logger.info("ℹ️ Falling back to in-memory storage")
+    else:
+        logger.info("ℹ️ Using in-memory storage")
+
+# Use persistent Qdrant client with fallback
+def get_qdrant_client():
+    """Get Qdrant client (persistent or fallback)"""
+    if PERSISTENT_STORAGE_AVAILABLE and storage and storage.qdrant_client:
+        return storage.qdrant_client
+    else:
+        # Fallback to in-memory for development
+        return QdrantClient(path=":memory:")
+
+qdrant = get_qdrant_client()
 
 def collection_name(session_id: str) -> str:
     return f"doc_chunks_{session_id}"
 
 
-def session_log(session_id: str, event_type: str, data: Dict[str, Any]):
+async def session_log(session_id: str, event_type: str, data: Dict[str, Any]):
+    """Enhanced session logging with persistent storage"""
     try:
+        # Store in persistent storage if available
+        if PERSISTENT_STORAGE_AVAILABLE and storage and storage.postgres_pool:
+            await storage.save_chat_message(
+                session_id=session_id,
+                role="system",
+                content=f"Event: {event_type}",
+                metadata=data
+            )
+        
+        # Also maintain in-memory for backward compatibility
         sess = SESSIONS.setdefault(session_id, {})
         events = sess.setdefault("events", [])
         data = dict(data)
@@ -72,8 +117,8 @@ def session_log(session_id: str, event_type: str, data: Dict[str, Any]):
         # keep only last 100
         if len(events) > 100:
             del events[:-100]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Session logging failed: {e}")
 
 # Config loader (JSON file with env overrides)
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -116,8 +161,8 @@ DEFAULT_OPENAI_GEN = os.environ.get(
 
 # Local SBERT model (lazy loaded)
 _sbert_model = None  # lazy-loaded SentenceTransformer instance
-_local_llm = None   # lazy-loaded GPT4All model instance
-_local_llm_name: Optional[str] = None  # selected local model name for diagnostics
+_ollama_available = None   # lazy-checked Ollama availability
+# _local_llm_name: Optional[str] = None  # selected local model name for diagnostics (replaced with Ollama)
 
 def get_sbert():
     """Lazy-load SBERT model for embeddings with improved error handling."""
@@ -128,7 +173,17 @@ def get_sbert():
     try:
         logger.info("🔄 Loading SBERT model for fallback embeddings...")
         from sentence_transformers import SentenceTransformer
-        _sbert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        
+        # Try to load the model with explicit cache directory to avoid huggingface_hub issues
+        import os
+        cache_dir = "/tmp/sbert_cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Use environment variable to control huggingface_hub behavior
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        
+        _sbert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", cache_folder=cache_dir)
         logger.info("✅ SBERT model loaded successfully")
         return _sbert_model
     except Exception as e:
@@ -136,104 +191,42 @@ def get_sbert():
         logger.info("ℹ️ System will continue without SBERT fallback")
         return None
 
-def get_local_llm():
-    """Lazy-load a local LLM via GPT4All, preferring an on-disk GGUF before any downloads.
-    Preference order:
-      1) LOCAL_LLM_PATH (if it points to an existing file)
-      2) A bundled GGUF in app/models with priority to 'orca-mini-3b-gguf2-q4_0.gguf', then any *.gguf
-      3) Named models (LOCAL_LLM_MODEL or small defaults) which may trigger download
+def check_ollama_available():
+    """Check if Ollama is available and has models.
+    
+    Returns:
+        bool: True if Ollama is available and has models, False otherwise.
     """
-    global _local_llm, _local_llm_name
-    if _local_llm is not None:
-        return _local_llm
+    global _ollama_available
+    
+    if _ollama_available is not None:
+        return _ollama_available
+    
     try:
-        from gpt4all import GPT4All  # type: ignore
+        ollama_host = os.getenv("OLLAMA_HOST", "localhost")
+        ollama_port = os.getenv("OLLAMA_PORT", "11434")
+        ollama_url = f"http://{ollama_host}:{ollama_port}"
+        
+        # Check if Ollama is running
+        response = requests.get(f"{ollama_url}/api/tags", timeout=5)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            if models:
+                _ollama_available = True
+                logger.info(f"✅ Ollama available with {len(models)} models")
+                return True
+            else:
+                logger.info("⚠️ Ollama is running but no models are available")
+                _ollama_available = False
+                return False
+        else:
+            logger.info(f"⚠️ Ollama not responding: {response.status_code}")
+            _ollama_available = False
+            return False
     except Exception as e:
-        logger.info(f"Local LLM unavailable (GPT4All import failed): {e}")
-        return None
-
-    # Determine models directory inside backend/app, allow config override
-    cfg_local = (_CONFIG.get("local_llm") or {})
-    cfg_dir = cfg_local.get("dir")
-    models_dir = cfg_dir or os.path.join(os.path.dirname(__file__), "models")
-    try:
-        os.makedirs(models_dir, exist_ok=True)
-    except Exception:
-        pass
-
-    # 1) Explicit path override
-    explicit_path = os.environ.get("LOCAL_LLM_PATH") or cfg_local.get("path")
-    if explicit_path and os.path.isfile(explicit_path):
-        name = os.path.basename(explicit_path)
-        directory = os.path.dirname(explicit_path)
-        try:
-            _local_llm = GPT4All(name, model_path=directory)
-            _local_llm_name = name
-            logger.info(f"Local LLM loaded from explicit path: {explicit_path}")
-            return _local_llm
-        except Exception as e:
-            logger.info(f"Failed to load local LLM from LOCAL_LLM_PATH={explicit_path}: {e}")
-
-    # 2) Prefer bundled GGUF(s) - updated with best available models
-    preferred = [
-        "mistral-7b-openorca.gguf2.Q4_0.gguf",  # Best overall fast chat model
-        "mistral-7b-instruct-v0.1.Q4_0.gguf",   # Best instruction following model
-        "orca-mini-3b-gguf2-q4_0.gguf",         # Small but good model
-        "gpt4all-falcon-newbpe-q4_0.gguf",      # Fast model with good quality
-    ]
-    chosen_name: Optional[str] = None
-    for nm in preferred:
-        p = os.path.join(models_dir, nm)
-        if os.path.isfile(p):
-            chosen_name = nm
-            break
-    if chosen_name is None:
-        # First available *.gguf in models_dir
-        try:
-            ggufs = [f for f in os.listdir(models_dir) if f.lower().endswith(".gguf")]
-            if ggufs:
-                ggufs.sort()
-                chosen_name = ggufs[0]
-        except Exception:
-            pass
-    if chosen_name:
-        try:
-            _local_llm = GPT4All(chosen_name, model_path=models_dir)
-            _local_llm_name = chosen_name
-            logger.info(f"✅ Local LLM loaded: {chosen_name} (dir={models_dir})")
-            return _local_llm
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to load bundled model {chosen_name}: {e}")
-            logger.info(f"Failed to load bundled local LLM '{chosen_name}': {e}")
-
-    # 3) Fallback to named models (may download on first use) - updated with working models
-    fallback_models = [
-        "mistral-7b-openorca.gguf2.Q4_0.gguf",  # Best overall fast chat model
-        "mistral-7b-instruct-v0.1.Q4_0.gguf",   # Best instruction following model  
-        "orca-mini-3b-gguf2-q4_0.gguf",         # Small but good model
-        "gpt4all-falcon-newbpe-q4_0.gguf",      # Fast model with good quality
-    ]
-    
-    # Try each fallback model in order
-    for model_name in fallback_models:
-        try:
-            logger.info(f"🔄 Attempting to download local LLM: {model_name}")
-            logger.info("📥 This may take a few minutes on first run...")
-            
-            _local_llm = GPT4All(model_name, model_path=models_dir)
-            _local_llm_name = model_name
-            logger.info(f"✅ Local LLM successfully loaded: {model_name} (dir={models_dir})")
-            return _local_llm
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to download/load local LLM '{model_name}': {e}")
-            continue
-    
-    # If all models fail, suggest running the installation script
-    logger.warning("⚠️ All local LLM models failed to load")
-    logger.info("💡 Run 'python install_local_llm.py' to install local models")
-    logger.info("ℹ️ System will continue without local LLM - using cloud providers only")
-    return None
+        logger.info(f"⚠️ Ollama unavailable: {e}")
+        _ollama_available = False
+        return False
 
 # ---------- Models ----------
 class UploadResponse(BaseModel):
@@ -572,12 +565,12 @@ def generate_with_openai(prompt: str, api_key: str, model_name: Optional[str]) -
 
 
 def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]], max_chars: int = 8000) -> Optional[str]:
-    """Generate an answer with a local LLM (GPT4All) using provided chunks as context.
-    Returns None if local LLM is not available or generation fails.
+    """Generate an answer with Ollama using provided chunks as context.
+    Returns None if Ollama is not available or generation fails.
     """
-    llm = get_local_llm()
-    if llm is None:
+    if not check_ollama_available():
         return None
+    
     # Build compact context up to max_chars
     parts = []
     total = 0
@@ -596,13 +589,44 @@ def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]], max_cha
         "If the answer is not present, say you don't know. Cite sources as [Source N].\n\n"
     )
     prompt = f"{system}Context:\n{context}\nQuestion: {question}\nAnswer:"
+    
     try:
-        # GPT4All chat session keeps context local; deterministic-ish output
-        with llm.chat_session():
-            out = llm.generate(prompt, max_tokens=512, temp=0.2)
-        return (out or "").strip() or None
+        ollama_host = os.getenv("OLLAMA_HOST", "localhost")
+        ollama_port = os.getenv("OLLAMA_PORT", "11434")
+        ollama_url = f"http://{ollama_host}:{ollama_port}"
+        
+        # Try models in order of preference: llama3:8b (balanced), mistral:7b (faster), phi3:3.8b (tiny)
+        preferred_models = ["llama3:8b", "mistral:7b", "phi3:3.8b"]
+        
+        for model in preferred_models:
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_predict": 512
+                }
+            }
+            
+            try:
+                response = requests.post(f"{ollama_url}/api/generate", json=payload, timeout=30)
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result.get("response", "").strip()
+                    if answer:
+                        logger.info(f"✅ Ollama generation successful with {model}")
+                        return answer
+                else:
+                    logger.info(f"⚠️ Ollama generation failed with {model}: {response.status_code}")
+            except Exception as e:
+                logger.info(f"⚠️ Ollama generation failed with {model}: {e}")
+                continue
+        
+        logger.info("❌ All Ollama models failed")
+        return None
     except Exception as e:
-        logger.info(f"Local LLM generation failed: {e}")
+        logger.info(f"Ollama generation failed: {e}")
         return None
 
 
@@ -907,13 +931,25 @@ async def upload(
 
     qdrant.upsert(collection_name=coll, points=points)
 
-    # store session config
+    # store session config in persistent storage if available
+    if PERSISTENT_STORAGE_AVAILABLE and storage:
+        session_data = {
+            "provider": provider,
+            "api_key": api_key,
+            "embedding_model": emb_model,
+            "generation_model": gen_model,
+            "name": f"Session {session_id[:8]}"
+        }
+        await storage.save_session(session_id, session_data)
+    
+    # Also maintain in-memory for backward compatibility
     SESSIONS.setdefault(session_id, {})
     SESSIONS[session_id]["provider"] = provider
     SESSIONS[session_id]["api_key"] = api_key
     SESSIONS[session_id]["embedding_model"] = emb_model
     SESSIONS[session_id]["generation_model"] = gen_model
-    session_log(session_id, "upload", {
+    
+    await session_log(session_id, "upload", {
         "doc": filename,
         "chunks_indexed": len(points),
         "provider": provider,
@@ -1043,8 +1079,8 @@ async def ask(req: AskRequest):
             answer = local_answer
             used_fallback = True or used_fallback
             gen_provider = "local-llm"
-            generation_model_name = _local_llm_name or os.environ.get("LOCAL_LLM_MODEL", "local-llm")
-            logger.info("/ask: fallback generation used (local LLM via GPT4All)")
+            generation_model_name = "ollama-llama3:8b"  # Default Ollama model
+            logger.info("/ask: fallback generation used (local LLM via Ollama)")
         else:
             # Final resort: heuristic extractive answer
             answer = heuristic_answer(req.question, top_chunks)
@@ -1053,7 +1089,28 @@ async def ask(req: AskRequest):
             generation_model_name = None
             logger.info("/ask: fallback generation used (heuristic)")
 
-    session_log(req.session_id, "ask", {
+    # Save chat history to persistent storage if available
+    if PERSISTENT_STORAGE_AVAILABLE and storage:
+        await storage.save_chat_message(
+            session_id=req.session_id,
+            role="user",
+            content=req.question
+        )
+        await storage.save_chat_message(
+            session_id=req.session_id,
+            role="assistant",
+            content=answer,
+            sources=top_chunks,
+            metadata={
+                "used_fallback": used_fallback,
+                "gen_provider": gen_provider,
+                "generation_model": generation_model_name,
+                "embed_provider": embed_provider,
+                "embedding_model": embedding_model_name
+            }
+        )
+
+    await session_log(req.session_id, "ask", {
         "question": req.question,
         "provider": session_provider,
         "embed_provider": embed_provider,
@@ -1134,20 +1191,76 @@ async def validate_provider(req: ProviderValidationRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Enhanced health check with storage status"""
+    if PERSISTENT_STORAGE_AVAILABLE and storage:
+        health_status = {
+            "status": "ok",
+            "storage": {
+                "redis": "connected" if storage.redis_client else "disconnected",
+                "postgres": "connected" if storage.postgres_pool else "disconnected", 
+                "qdrant": "connected" if storage.qdrant_client else "disconnected"
+            }
+        }
+    else:
+        health_status = {
+            "status": "ok",
+            "storage": {
+                "redis": "not_available",
+                "postgres": "not_available", 
+                "qdrant": "in_memory"
+            }
+        }
+    return health_status
+
+# New endpoints for persistent storage
+@app.get("/sessions")
+async def get_sessions(user_id: str = "default"):
+    """Get all sessions for a user"""
+    if PERSISTENT_STORAGE_AVAILABLE and storage:
+        sessions = await storage.get_user_sessions(user_id)
+        return {"sessions": sessions}
+    else:
+        # Fallback to in-memory sessions
+        sessions = [{"id": k, "name": f"Session {k[:8]}", "status": "active"} for k in SESSIONS.keys()]
+        return {"sessions": sessions}
+
+@app.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str, limit: int = 50):
+    """Get chat history for a session"""
+    if PERSISTENT_STORAGE_AVAILABLE and storage:
+        history = await storage.get_chat_history(session_id, limit)
+        return {"history": history}
+    else:
+        # Fallback to in-memory events
+        session_info = SESSIONS.get(session_id, {})
+        events = session_info.get("events", [])
+        return {"history": events[-limit:]}
 
 
 @app.get("/models/local")
 async def local_model_status():
-    """Quick diagnostic endpoint to check if a local GPT4All model is available."""
-    llm = get_local_llm()
-    if llm is None:
-        return {"available": False}
+    """Quick diagnostic endpoint to check if Ollama is available."""
+    ollama_available = check_ollama_available()
+    if not ollama_available:
+        return {"available": False, "model": None}
+    
     try:
-        name = _local_llm_name or getattr(llm, "model_name", None) or os.environ.get("LOCAL_LLM_MODEL")
-    except Exception:
-        name = _local_llm_name or os.environ.get("LOCAL_LLM_MODEL")
-    return {"available": True, "model": name}
+        ollama_host = os.getenv("OLLAMA_HOST", "localhost")
+        ollama_port = os.getenv("OLLAMA_PORT", "11434")
+        ollama_url = f"http://{ollama_host}:{ollama_port}"
+        
+        response = requests.get(f"{ollama_url}/api/tags", timeout=5)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            if models:
+                # Return the first available model
+                model_name = models[0].get("name", "unknown")
+                return {"available": True, "model": model_name}
+        
+        return {"available": False, "model": None}
+    except Exception as e:
+        logger.info(f"Error checking Ollama models: {e}")
+        return {"available": False, "model": None}
 
 
 @app.get("/session/{session_id}/diagnostics")
@@ -1180,23 +1293,23 @@ async def session_events(session_id: str, limit: int = 50):
 if __name__ == "__main__":
     import uvicorn
 
-# Optimized components (conditional imports to avoid errors)
-try:
-    from .cleaned_endpoints import router as optimized_router
-    from .optimized_providers import OptimizedGeminiProvider, OptimizedOpenAIProvider, ProviderConfig
-    from .optimized_fallback import fallback_manager, enhanced_local_llm
-    from .data_flow_optimizer import data_optimizer
-    OPTIMIZED_COMPONENTS_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"Optimized components not available: {e}")
-    OPTIMIZED_COMPONENTS_AVAILABLE = False
+# Optimized components (temporarily disabled to fix startup issues)
+# try:
+#     from .cleaned_endpoints import router as optimized_router
+#     from .optimized_providers import OptimizedGeminiProvider, OptimizedOpenAIProvider, ProviderConfig
+#     from .optimized_fallback import fallback_manager, enhanced_local_llm
+#     from .data_flow_optimizer import data_optimizer
+#     OPTIMIZED_COMPONENTS_AVAILABLE = True
+# except ImportError as e:
+#     logger.warning(f"Optimized components not available: {e}")
+#     OPTIMIZED_COMPONENTS_AVAILABLE = False
 
 # Include optimized endpoints if available
-if OPTIMIZED_COMPONENTS_AVAILABLE:
-    app.include_router(optimized_router)
-    logger.info("✅ Optimized endpoints loaded")
-else:
-    logger.info("ℹ️ Using standard endpoints only")
+# if OPTIMIZED_COMPONENTS_AVAILABLE:
+#     app.include_router(optimized_router)
+#     logger.info("✅ Optimized endpoints loaded")
+# else:
+logger.info("ℹ️ Using standard endpoints only (optimized components temporarily disabled)")
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)

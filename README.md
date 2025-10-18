@@ -11,24 +11,23 @@ A powerful document question-answering system with multi-LLM support, intelligen
 - 🔍 **Smart Search**: Vector-based semantic search with context optimization
 - 🌐 **Real-time Streaming**: Live response streaming for better UX
 - 📊 **Health Monitoring**: Comprehensive system health and performance metrics
+- 🐳 **Docker Ready**: Complete containerization with persistent storage
+- 💾 **Persistent Storage**: Redis caching, PostgreSQL database, persistent Qdrant
+- 🔄 **Session Management**: Multi-session support with chat history
 
 ## 🚀 **Quick Start**
 
-### **Option 1: One-Click Start (Recommended)**
+### **Option 1: Docker (Recommended for Production)**
 
-**Windows:**
+**All Platforms:**
 ```bash
-# Double-click start_windows.bat
+# One-command setup with persistent storage
+./docker-start.sh
 ```
 
-**macOS:**
+**Manual Docker:**
 ```bash
-./start_macos.sh
-```
-
-**Linux:**
-```bash
-./start_linux.sh
+docker-compose up --build -d
 ```
 
 ### **Option 2: Manual Installation**
@@ -54,6 +53,15 @@ npm start
 
 ## 🌐 **Access Your Application**
 
+### **Docker Setup:**
+- **Frontend**: http://localhost:4200
+- **Backend API**: http://localhost:8000
+- **API Documentation**: http://localhost:8000/docs
+- **Health Check**: http://localhost:8000/health
+- **Qdrant**: http://localhost:6333
+- **Nginx Proxy**: http://localhost (optional)
+
+### **Manual Setup:**
 - **Frontend**: http://localhost:4200
 - **Backend API**: http://localhost:8000
 - **API Documentation**: http://localhost:8000/docs

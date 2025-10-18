@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # Backend (FastAPI)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=docqa
+      - POSTGRES_USER=docqa_user
+      - POSTGRES_PASSWORD=docqa_password
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+    volumes:
+      - ./backend/app/models:/app/models
+      - ./production_storage:/app/storage
+    depends_on:
+      - redis
+      - postgres
+      - qdrant
+      - ollama
+    networks:
+      - docqa-network
+
+  # Vector Database (Qdrant)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - docqa-network
+
+  # Caching & Session Store (Redis)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - docqa-network
+
+  # Persistent Database (PostgreSQL)
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=docqa
+      - POSTGRES_USER=docqa_user
+      - POSTGRES_PASSWORD=docqa_password
+    networks:
+      - docqa-network
+
+  # Local LLM (Ollama)
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - docqa-network
+
+volumes:
+  qdrant_data:
+  redis_data:
+  postgres_data:
+  ollama_data:
+
+networks:
+  docqa-network:
+    driver: bridge
