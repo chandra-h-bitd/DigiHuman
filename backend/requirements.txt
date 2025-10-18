@@ -32,3 +32,6 @@ psutil==5.9.6
 # Persistent storage dependencies
 redis==5.0.1
 asyncpg==0.29.0
+
+# Enhanced session management dependencies
+aiofiles==23.2.1

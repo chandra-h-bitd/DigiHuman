@@ -48,8 +48,8 @@ COPY *.py ./
 RUN mkdir -p /app/storage/documents /app/storage/embeddings /app/storage/sessions
 RUN mkdir -p /home/docqa/nltk_data
 
-# Download NLTK data as root
-RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
+# Download NLTK data as root to the correct location
+RUN python -c "import nltk; nltk.data.path.append('/home/docqa/nltk_data'); nltk.download('punkt', download_dir='/home/docqa/nltk_data'); nltk.download('punkt_tab', download_dir='/home/docqa/nltk_data')"
 
 # Set ownership
 RUN chown -R docqa:docqa /app /home/docqa

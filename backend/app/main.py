@@ -6,7 +6,7 @@ import json
 from typing import List, Optional, Dict, Any
 import logging
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -22,6 +22,10 @@ from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, Fi
 
 import requests
 import json as _json
+
+# Import new session management and multi-document features
+from .session_manager import session_manager, SessionMetadata, SessionStatus
+from .multi_document_handler import document_processor
 
 # Ensure punkt + punkt_tab for NLTK 3.9
 # NLTK setup (handled in Dockerfile)
@@ -243,6 +247,44 @@ class AskRequest(BaseModel):
     k: int = 5
     provider: str = "gemini"  # "gemini" or "openai"
     api_key: Optional[str] = None
+    embedding_model: Optional[str] = None
+    generation_model: Optional[str] = None
+
+# New models for enhanced session management
+class CreateSessionRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    provider: str = "ollama"
+    tags: Optional[List[str]] = None
+    settings: Optional[Dict[str, Any]] = None
+
+class SessionResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    provider: str
+    status: str
+    created_at: str
+    updated_at: str
+    last_activity: str
+    document_count: int
+    total_chunks: int
+    tags: List[str]
+    settings: Dict[str, Any]
+
+class MultiUploadRequest(BaseModel):
+    session_id: str
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
+
+class MultiUploadResponse(BaseModel):
+    session_id: str
+    total_files: int
+    processed_files: int
+    failed_files: int
+    total_chunks: int
+    documents: List[Dict[str, Any]]
+    errors: List[Dict[str, Any]]
     embedding_model: Optional[str] = None
     generation_model: Optional[str] = None
 
@@ -1288,6 +1330,177 @@ async def session_events(session_id: str, limit: int = 50):
     info = SESSIONS.get(session_id, {})
     events = info.get("events", [])
     return events[-limit:]
+
+# ========== NEW ENHANCED SESSION MANAGEMENT ENDPOINTS ==========
+
+@app.post("/sessions/create", response_model=SessionResponse)
+async def create_session(request: CreateSessionRequest):
+    """Create a new session with enhanced metadata"""
+    try:
+        session = await session_manager.create_session(
+            name=request.name,
+            description=request.description,
+            provider=request.provider,
+            tags=request.tags,
+            settings=request.settings
+        )
+        
+        return SessionResponse(
+            id=str(session.id),
+            name=session.name,
+            description=session.description,
+            provider=session.provider,
+            status=session.status.value,
+            created_at=session.created_at.isoformat(),
+            updated_at=session.updated_at.isoformat(),
+            last_activity=session.last_activity.isoformat(),
+            document_count=session.document_count,
+            total_chunks=session.total_chunks,
+            tags=session.tags,
+            settings=session.settings
+        )
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sessions/enhanced", response_model=List[SessionResponse])
+async def list_sessions_enhanced(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """List sessions with enhanced filtering and pagination"""
+    try:
+        session_status = SessionStatus(status) if status else None
+        sessions = await session_manager.list_sessions(
+            status=session_status,
+            limit=limit,
+            offset=offset
+        )
+        
+        return [
+            SessionResponse(
+                id=session.id,
+                name=session.name,
+                description=session.description,
+                provider=session.provider,
+                status=session.status.value,
+                created_at=session.created_at.isoformat(),
+                updated_at=session.updated_at.isoformat(),
+                last_activity=session.last_activity.isoformat(),
+                document_count=session.document_count,
+                total_chunks=session.total_chunks,
+                tags=session.tags,
+                settings=session.settings
+            )
+            for session in sessions
+        ]
+    except Exception as e:
+        logger.error(f"Error listing sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sessions/{session_id}/enhanced", response_model=SessionResponse)
+async def get_session_enhanced(session_id: str):
+    """Get session with enhanced metadata"""
+    try:
+        session = await session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return SessionResponse(
+            id=str(session.id),
+            name=session.name,
+            description=session.description,
+            provider=session.provider,
+            status=session.status.value,
+            created_at=session.created_at.isoformat(),
+            updated_at=session.updated_at.isoformat(),
+            last_activity=session.last_activity.isoformat(),
+            document_count=session.document_count,
+            total_chunks=session.total_chunks,
+            tags=session.tags,
+            settings=session.settings
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/sessions/{session_id}/archive")
+async def archive_session(session_id: str):
+    """Archive a session"""
+    try:
+        await session_manager.archive_session(session_id)
+        return {"message": "Session archived successfully"}
+    except Exception as e:
+        logger.error(f"Error archiving session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session (soft delete)"""
+    try:
+        await session_manager.delete_session(session_id)
+        return {"message": "Session deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sessions/{session_id}/documents")
+async def get_session_documents(session_id: str):
+    """Get all documents in a session"""
+    try:
+        documents = await session_manager.get_session_documents(session_id)
+        return {"documents": documents}
+    except Exception as e:
+        logger.error(f"Error getting session documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ========== MULTI-DOCUMENT UPLOAD ENDPOINTS ==========
+
+@app.post("/upload/multiple", response_model=MultiUploadResponse)
+async def upload_multiple_documents(
+    files: List[UploadFile] = File(...),
+    session_id: str = Form(...),
+    chunk_size: int = Form(1000),
+    chunk_overlap: int = Form(200)
+):
+    """Upload and process multiple documents concurrently"""
+    try:
+        if not files:
+            raise HTTPException(status_code=400, detail="No files provided")
+        
+        # Verify session exists
+        session = await session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Process documents
+        result = await document_processor.process_multiple_documents(
+            files=files,
+            session_id=session_id,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+        
+        return MultiUploadResponse(
+            session_id=result["session_id"],
+            total_files=result["total_files"],
+            processed_files=result["processed_files"],
+            failed_files=result["failed_files"],
+            total_chunks=result["total_chunks"],
+            documents=result["documents"],
+            errors=result["errors"],
+            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            generation_model="ollama-llama3:8b"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing multiple documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -171,3 +171,8 @@ frontend/start_windows.bat   # Starts frontend
 # Just run these commands:
 ./backend/start_linux.sh     # Starts backend
 ./frontend/start_linux.sh    # Starts frontend
+
+
+
+AIzaSyBRCFGKFd5RU81P6rizfJa49wBWIJUZ0K8
+AIzaSyC0_UWujD0SSGDIejLNUosbTcd3fuBM8Zo
