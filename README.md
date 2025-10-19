@@ -176,3 +176,4 @@ frontend/start_windows.bat   # Starts frontend
 
 AIzaSyBRCFGKFd5RU81P6rizfJa49wBWIJUZ0K8
 AIzaSyC0_UWujD0SSGDIejLNUosbTcd3fuBM8Zo
+AIzaSyDy9FLpxLM_7AWRYKYbVVH7fIvjMAe-pVw 

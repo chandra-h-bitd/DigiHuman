@@ -451,8 +451,33 @@ async def upload_document(
         filename = file.filename
         file_size = len(content)
         
-        # Extract text content (simple UTF-8 decoding)
-        text_content = content.decode('utf-8', errors='ignore')
+        # Extract text content based on file type
+        text_content = ""
+        if filename.lower().endswith('.docx'):
+            # Handle DOCX files
+            import io
+            from docx import Document
+            try:
+                doc = Document(io.BytesIO(content))
+                text_content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            except Exception as e:
+                logger.error(f"Error processing DOCX file: {e}")
+                text_content = content.decode('utf-8', errors='ignore')
+        elif filename.lower().endswith('.pdf'):
+            # Handle PDF files
+            import fitz  # PyMuPDF
+            try:
+                doc = fitz.open(stream=content, filetype="pdf")
+                text_content = ""
+                for page in doc:
+                    text_content += page.get_text()
+                doc.close()
+            except Exception as e:
+                logger.error(f"Error processing PDF file: {e}")
+                text_content = content.decode('utf-8', errors='ignore')
+        else:
+            # Handle plain text files
+            text_content = content.decode('utf-8', errors='ignore')
         
         # Chunk the content
         chunks = chunk_text(text_content, chunk_size, chunk_overlap)
@@ -598,7 +623,7 @@ async def ask_question(request: AskRequest):
             ),
             with_payload=True,
             with_vectors=False,  # Don't return vectors to save bandwidth
-            score_threshold=0.3  # Minimum similarity score
+            score_threshold=0.1  # Minimum similarity score (lowered for better generic question matching)
         )
         
         # Handle case where no results found
@@ -619,7 +644,7 @@ async def ask_question(request: AskRequest):
         context_parts = []
         
         for result in search_results:
-            if result.score >= 0.3:  # Filter by similarity score
+            if result.score >= 0.1:  # Filter by similarity score (lowered for better generic question matching)
                 sources.append({
                     "text": result.payload.get("text", ""),
                     "score": result.score,
