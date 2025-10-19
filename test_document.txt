@@ -1,1 +1,1 @@
-This is a test document for the Document Q&A system. It contains information about artificial intelligence and machine learning. The system should be able to process this document and answer questions about it.
+This is a test document for the Document Q&A system. It contains information about artificial intelligence and machine learning. The system should be able to process this text and answer questions about it.

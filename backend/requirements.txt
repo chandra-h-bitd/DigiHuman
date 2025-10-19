@@ -28,3 +28,7 @@ psutil==5.9.6
 # Performance optimization
 uvloop==0.19.0
 httpx==0.25.2
+
+# Database dependencies
+asyncpg==0.29.0
+redis==5.0.1

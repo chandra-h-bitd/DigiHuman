@@ -38,6 +38,12 @@ from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filte
 import requests
 import json
 
+# Phase 3 Advanced Features
+from app.advanced_session_manager import AdvancedSessionManager, SessionMetadata, DocumentMetadata
+from app.advanced_search import AdvancedSearchEngine, SearchFilters, SearchResult
+from app.performance_optimizer import PerformanceOptimizer
+from app.security_manager import SecurityManager, SecurityEvent
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -71,6 +77,12 @@ app.add_middleware(
 qdrant_client: Optional[QdrantClient] = None
 embedder: Optional[SentenceTransformer] = None
 
+# Phase 3 Advanced Features
+session_manager: Optional[AdvancedSessionManager] = None
+search_engine: Optional[AdvancedSearchEngine] = None
+performance_optimizer: Optional[PerformanceOptimizer] = None
+security_manager: Optional[SecurityManager] = None
+
 # =============================================================================
 # PYDANTIC MODELS
 # =============================================================================
@@ -94,6 +106,58 @@ class AskResponse(BaseModel):
     generation_model: Optional[str]  # Model name
     embed_provider: str  # Embedding provider
     embedding_model: str  # Embedding model name
+
+# Phase 3 Advanced Models
+class SessionCreateRequest(BaseModel):
+    """Request model for creating sessions"""
+    name: str
+    description: Optional[str] = None
+    user_id: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+class SessionResponse(BaseModel):
+    """Response model for sessions"""
+    id: str
+    name: str
+    description: Optional[str]
+    status: str
+    created_at: str
+    updated_at: str
+    document_count: int
+    total_chunks: int
+    last_activity: str
+    user_id: Optional[str]
+    tags: List[str]
+
+class AdvancedSearchRequest(BaseModel):
+    """Request model for advanced search"""
+    session_id: str
+    query: str
+    search_filters: Optional[Dict[str, Any]] = None
+    semantic_weight: float = 0.7
+    keyword_weight: float = 0.3
+    max_results: int = 10
+
+class AdvancedSearchResponse(BaseModel):
+    """Response model for advanced search"""
+    results: List[Dict[str, Any]]
+    total_results: int
+    search_type: str
+    query_time_ms: float
+    suggestions: List[str]
+
+class PerformanceMetricsResponse(BaseModel):
+    """Response model for performance metrics"""
+    metrics: List[Dict[str, Any]]
+    endpoint_stats: Dict[str, Any]
+    cache_stats: Dict[str, Any]
+    system_health: Dict[str, Any]
+
+class SecurityStatsResponse(BaseModel):
+    """Response model for security statistics"""
+    security_events: List[Dict[str, Any]]
+    security_stats: Dict[str, Any]
+    rate_limit_status: Dict[str, Any]
 
 class UploadResponse(BaseModel):
     """Response model for document uploads"""
@@ -127,8 +191,9 @@ async def initialize_services():
     Initialize all required services:
     - Qdrant vector database client
     - Sentence transformer embedder
+    - Phase 3 Advanced Features
     """
-    global qdrant_client, embedder
+    global qdrant_client, embedder, session_manager, search_engine, performance_optimizer, security_manager
     
     try:
         # Initialize Qdrant client with optimized settings
@@ -144,6 +209,41 @@ async def initialize_services():
         embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         logger.info("✅ Sentence transformer embedder initialized")
         
+        # Phase 3: Initialize Redis client
+        import redis
+        redis_client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            decode_responses=True
+        )
+        logger.info("✅ Redis client initialized")
+        
+        # Phase 3: Initialize PostgreSQL pool
+        import asyncpg
+        postgres_pool = await asyncpg.create_pool(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", 5432)),
+            database=os.getenv("POSTGRES_DB", "docqa"),
+            user=os.getenv("POSTGRES_USER", "docqa_user"),
+            password=os.getenv("POSTGRES_PASSWORD", "docqa_password"),
+            min_size=5,
+            max_size=20
+        )
+        logger.info("✅ PostgreSQL connection pool initialized")
+        
+        # Phase 3: Initialize database tables
+        from app.init_phase3_database import init_phase3_database
+        await init_phase3_database()
+        logger.info("✅ Phase 3 database tables initialized")
+        
+        # Phase 3: Initialize advanced features
+        session_manager = AdvancedSessionManager(redis_client, postgres_pool, qdrant_client)
+        search_engine = AdvancedSearchEngine(qdrant_client, embedder)
+        performance_optimizer = PerformanceOptimizer(redis_client, postgres_pool, qdrant_client)
+        security_manager = SecurityManager(redis_client)
+        
+        logger.info("✅ Phase 3 advanced features initialized")
+            
     except Exception as e:
         logger.error(f"❌ Service initialization failed: {e}")
         raise
@@ -201,7 +301,7 @@ def chunk_text(text: str, chunk_size: int = 1500, chunk_overlap: int = 200) -> L
         chunks.append(text[start:end])
         start = end - chunk_overlap
     
-    return chunks
+        return chunks
 
 async def generate_with_ollama(question: str, context: str) -> str:
     """
@@ -214,12 +314,11 @@ async def generate_with_ollama(question: str, context: str) -> str:
     Returns:
         Generated answer
     """
-    try:
-        ollama_host = os.getenv("OLLAMA_HOST", "localhost")
-        ollama_port = os.getenv("OLLAMA_PORT", "11434")
-        
-        # Construct prompt with context
-        prompt = f"""Based on the following context, answer the question. 
+    ollama_host = os.getenv("OLLAMA_HOST", "localhost")
+    ollama_port = os.getenv("OLLAMA_PORT", "11434")
+    
+    # Construct prompt with context
+    prompt = f"""Based on the following context, answer the question. 
 If the answer is not in the context, say "I couldn't find enough information in the provided context."
 
 Context: {context}
@@ -227,8 +326,9 @@ Context: {context}
 Question: {question}
 
 Answer:"""
-        
-        # Make request to Ollama API
+    
+    # Make request to Ollama API
+    try:
         response = requests.post(
             f"http://{ollama_host}:{ollama_port}/api/generate",
             json={
@@ -320,8 +420,8 @@ async def health_check():
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_document(
-    file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),
+    file: UploadFile = File(...), 
+    session_id: Optional[str] = Form(None), 
     chunk_size: int = Form(1500),
     chunk_overlap: int = Form(200),
     provider: Optional[str] = Form(None),
@@ -381,7 +481,7 @@ async def upload_document(
                 id=point_id,
                 vector=embedding,
                 payload={
-                    "session_id": session_id,
+            "session_id": session_id,
                     "document_id": document_id,
                     "chunk_index": i,
                     "text": chunk,
@@ -414,16 +514,16 @@ async def upload_document(
             api_valid = False
 
         return UploadResponse(
-                message=f"File {filename} uploaded and processed successfully",
-                filename=filename,
-                size=file_size,
-                chunks_created=len(chunks),
-                session_id=session_id,
-                used_fallback=used_fallback,
-                embedding_model=embedding_model_used,
-                api_valid=api_valid
-            )
-        
+            message=f"File {filename} uploaded and processed successfully",
+            filename=filename,
+            size=file_size,
+            chunks_created=len(chunks),
+            session_id=session_id,
+            used_fallback=used_fallback,
+            embedding_model=embedding_model_used,
+            api_valid=api_valid
+    )
+
     except Exception as e:
         logger.error(f"Error processing document: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -653,7 +753,7 @@ async def ask_question(request: AskRequest):
                         sources=[],
                         used_fallback=True,
                         gen_provider="heuristic",
-                        generation_model=None,
+                        generation_model=None, 
                         embed_provider="sbert",
                         embedding_model="sentence-transformers/all-MiniLM-L6-v2"
                     )
@@ -722,7 +822,7 @@ async def validate_api_key(request: ValidateRequest):
                             "generation": generation_models
                         },
                         api_valid=True
-                    )
+            )
                 else:
                     return ValidateResponse(
                         provider=request.provider,
@@ -837,6 +937,268 @@ async def validate_api_key(request: ValidateRequest):
             api_valid=False,
             error_message=f"Validation failed: {str(e)}"
         )
+
+# =============================================================================
+# PHASE 3 ADVANCED API ENDPOINTS
+# =============================================================================
+
+@app.post("/sessions", response_model=SessionResponse)
+async def create_session(request: SessionCreateRequest):
+    """Create a new session with advanced metadata"""
+    try:
+        session = await session_manager.create_session(
+            name=request.name,
+            description=request.description,
+            user_id=request.user_id,
+            tags=request.tags
+        )
+        
+        return SessionResponse(
+            id=session.id,
+            name=session.name,
+            description=session.description,
+            status=session.status.value,
+            created_at=session.created_at.isoformat(),
+            updated_at=session.updated_at.isoformat(),
+            document_count=session.document_count,
+            total_chunks=session.total_chunks,
+            last_activity=session.last_activity.isoformat(),
+            user_id=session.user_id,
+            tags=session.tags
+        )
+        
+    except Exception as e:
+        logger.error(f"Session creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sessions", response_model=List[SessionResponse])
+async def list_sessions(
+    user_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """List sessions with filtering and pagination"""
+    try:
+        from app.advanced_session_manager import SessionStatus
+        
+        status_enum = None
+        if status:
+            status_enum = SessionStatus(status)
+        
+        sessions = await session_manager.list_sessions(
+            user_id=user_id,
+            status=status_enum,
+            limit=limit,
+            offset=offset
+        )
+        
+        return [
+            SessionResponse(
+                id=session.id,
+                name=session.name,
+                description=session.description,
+                status=session.status.value,
+                created_at=session.created_at.isoformat(),
+                updated_at=session.updated_at.isoformat(),
+                document_count=session.document_count,
+                total_chunks=session.total_chunks,
+                last_activity=session.last_activity.isoformat(),
+                user_id=session.user_id,
+                tags=session.tags
+            )
+            for session in sessions
+        ]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Session listing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sessions/{session_id}", response_model=SessionResponse)
+async def get_session(session_id: str):
+    """Get session details"""
+    try:
+        session = await session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return SessionResponse(
+            id=session.id,
+            name=session.name,
+            description=session.description,
+            status=session.status.value,
+            created_at=session.created_at.isoformat(),
+            updated_at=session.updated_at.isoformat(),
+            document_count=session.document_count,
+            total_chunks=session.total_chunks,
+            last_activity=session.last_activity.isoformat(),
+            user_id=session.user_id,
+            tags=session.tags
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Session retrieval error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/search/advanced", response_model=AdvancedSearchResponse)
+async def advanced_search(request: AdvancedSearchRequest):
+    """Perform advanced hybrid search"""
+    try:
+        # Build search filters
+        filters = SearchFilters(
+            document_ids=request.search_filters.get("document_ids") if request.search_filters else None,
+            date_range=request.search_filters.get("date_range") if request.search_filters else None,
+            file_types=request.search_filters.get("file_types") if request.search_filters else None,
+            tags=request.search_filters.get("tags") if request.search_filters else None,
+            min_score=request.search_filters.get("min_score", 0.3) if request.search_filters else 0.3,
+            max_results=request.max_results
+        )
+        
+        # Perform hybrid search
+        start_time = time.time()
+        results = await search_engine.hybrid_search(
+            query=request.query,
+            session_id=request.session_id,
+            filters=filters,
+            semantic_weight=request.semantic_weight,
+            keyword_weight=request.keyword_weight
+        )
+        query_time = (time.time() - start_time) * 1000
+        
+        # Get search suggestions
+        suggestions = await search_engine.get_search_suggestions(
+            query=request.query,
+            session_id=request.session_id
+        )
+        
+        # Convert results to dict format
+        result_dicts = [
+            {
+                "text": result.text,
+                "score": result.score,
+                "document_id": result.document_id,
+                "chunk_index": result.chunk_index,
+                "metadata": result.metadata,
+                "search_type": result.search_type
+            }
+            for result in results
+        ]
+        
+        return AdvancedSearchResponse(
+            results=result_dicts,
+            total_results=len(results),
+            search_type="hybrid",
+            query_time_ms=query_time,
+            suggestions=suggestions
+        )
+        
+    except Exception as e:
+        logger.error(f"Advanced search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/performance/metrics", response_model=PerformanceMetricsResponse)
+async def get_performance_metrics(limit: int = 100):
+    """Get performance metrics and system health"""
+    try:
+        metrics = await performance_optimizer.get_performance_metrics(limit=limit)
+        endpoint_stats = await performance_optimizer.get_endpoint_stats()
+        cache_stats = await performance_optimizer.get_cache_stats()
+        system_health = await performance_optimizer.get_system_health()
+        
+        return PerformanceMetricsResponse(
+            metrics=metrics,
+            endpoint_stats=endpoint_stats,
+            cache_stats=cache_stats,
+            system_health=system_health
+        )
+        
+    except Exception as e:
+        logger.error(f"Performance metrics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/security/stats", response_model=SecurityStatsResponse)
+async def get_security_stats(limit: int = 100):
+    """Get security statistics and events"""
+    try:
+        security_events = await security_manager.get_security_events(limit=limit)
+        security_stats = await security_manager.get_security_stats()
+        
+        # Get rate limit status (simplified)
+        rate_limit_status = {
+            "active_rules": len(security_manager.rate_limit_rules),
+            "blocked_ips": len(await asyncio.get_event_loop().run_in_executor(
+                None, security_manager.redis.keys, "blocked_ip:*"
+            ))
+        }
+        
+        return SecurityStatsResponse(
+            security_events=security_events,
+            security_stats=security_stats,
+            rate_limit_status=rate_limit_status
+        )
+        
+    except Exception as e:
+        logger.error(f"Security stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/search/analytics/{session_id}")
+async def get_search_analytics(session_id: str):
+    """Get search analytics for a session"""
+    try:
+        analytics = await search_engine.get_search_analytics(session_id)
+        return analytics
+        
+    except Exception as e:
+        logger.error(f"Search analytics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sessions/{session_id}/analytics")
+async def get_session_analytics(session_id: str):
+    """Get analytics for a session"""
+    try:
+        analytics = await session_manager.get_session_analytics(session_id)
+        return analytics
+        
+    except Exception as e:
+        logger.error(f"Session analytics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session and all associated data"""
+    try:
+        await session_manager.delete_session(session_id)
+        return {"message": f"Session {session_id} deleted successfully"}
+        
+    except Exception as e:
+        logger.error(f"Session deletion error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/performance/optimize")
+async def optimize_performance():
+    """Trigger performance optimization"""
+    try:
+        await performance_optimizer.optimize_connections()
+        return {"message": "Performance optimization completed"}
+        
+    except Exception as e:
+        logger.error(f"Performance optimization error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/cache/clear")
+async def clear_cache(cache_type: Optional[str] = None):
+    """Clear cache entries"""
+    try:
+        await performance_optimizer.clear_cache(cache_type)
+        return {"message": f"Cache cleared: {cache_type or 'all'}"}
+        
+    except Exception as e:
+        logger.error(f"Cache clear error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =============================================================================
 # APPLICATION ENTRY POINT
