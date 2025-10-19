@@ -1,45 +1,58 @@
-version: '3.8'
-
 services:
-  # Frontend (Angular)
-  frontend:
-    build: 
-      context: ./frontend
-      dockerfile: Dockerfile
+  # Load Balancer (Nginx)
+  nginx:
+    image: nginx:alpine
+    container_name: docqa-nginx
     ports:
-      - "4200:80"
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
     depends_on:
       - backend
-    environment:
-      - BACKEND_URL=http://backend:8000
     networks:
       - docqa-network
 
-  # Backend (FastAPI)
+  # Backend (FastAPI) - Single clean instance
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    container_name: docqa-backend
     ports:
       - "8000:8000"
-    depends_on:
-      - redis
-      - qdrant
-      - postgres
     environment:
-      - REDIS_URL=redis://redis:6379
-      - QDRANT_URL=http://qdrant:6333
-      - DATABASE_URL=postgresql://docqa_user:docqa_password@postgres:5432/docqa
       - ENVIRONMENT=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=docqa
+      - POSTGRES_USER=docqa_user
+      - POSTGRES_PASSWORD=docqa_password
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
     volumes:
       - ./backend/app/models:/app/models
       - ./production_storage:/app/storage
+    depends_on:
+      - redis
+      - postgres
+      - qdrant
+      - ollama
     networks:
       - docqa-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
 
-  # Vector Database (Qdrant)
+  # Vector Database (Qdrant) - Optimized
   qdrant:
     image: qdrant/qdrant:latest
+    container_name: docqa-qdrant
     ports:
       - "6333:6333"
     volumes:
@@ -47,23 +60,42 @@ services:
     environment:
       - QDRANT__SERVICE__HTTP_PORT=6333
       - QDRANT__SERVICE__GRPC_PORT=6334
+      # Performance optimizations
+      - QDRANT__STORAGE__OPTIMIZER_CONFIG__INDEXING_THRESHOLD=1
+      - QDRANT__STORAGE__OPTIMIZER_CONFIG__FLUSH_INTERVAL_SEC=1
+      - QDRANT__STORAGE__OPTIMIZER_CONFIG__MAX_OPTIMIZATION_THREADS=8
+      - QDRANT__STORAGE__WAL_CONFIG__WAL_CAPACITY_MB=128
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_REQUESTS=1000
+      - QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=8
     networks:
       - docqa-network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
 
   # Caching & Session Store (Redis)
   redis:
     image: redis:7-alpine
+    container_name: docqa-redis
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
     networks:
       - docqa-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
 
   # Persistent Database (PostgreSQL)
   postgres:
     image: postgres:15-alpine
+    container_name: docqa-postgres
     ports:
       - "5432:5432"
     volumes:
@@ -72,20 +104,74 @@ services:
       - POSTGRES_DB=docqa
       - POSTGRES_USER=docqa_user
       - POSTGRES_PASSWORD=docqa_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+    networks:
+      - docqa-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Local LLM (Ollama)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: docqa-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+    networks:
+      - docqa-network
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+
+  # Monitoring (Prometheus)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: docqa-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
     networks:
       - docqa-network
 
-  # Nginx Reverse Proxy (Optional)
-  nginx:
-    image: nginx:alpine
+  # Monitoring Dashboard (Grafana)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: docqa-grafana
     ports:
-      - "80:80"
-      - "443:443"
+      - "3000:3000"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - frontend
-      - backend
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
       - docqa-network
 
@@ -93,6 +179,9 @@ volumes:
   qdrant_data:
   redis_data:
   postgres_data:
+  ollama_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   docqa-network:
