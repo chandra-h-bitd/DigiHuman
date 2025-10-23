@@ -42,7 +42,7 @@ See [Corporate Network Setup](#corporate-network-npm-issues)
 
 ## 📡 Corporate Network / NPM Issues
 
-### SSL Certificate Error
+### SSL Certificate Error (npm install)
 
 **Error:** `unable to get issuer certificate locally`
 
@@ -57,6 +57,27 @@ npm ping
 # Install
 cd frontend
 npm install
+```
+
+### SSL Certificate Error (npm start / Font Inlining)
+
+**Error:** `Inlining of fonts failed. An error has occurred while retrieving https://fonts.googleapis.com/icon`
+
+**This is already fixed!** The app is configured to work without Google Fonts CDN.
+
+If you still see this error:
+```bash
+# Clear Angular cache
+cd frontend
+rm -rf .angular
+rm -rf dist
+
+# Or on Windows
+Remove-Item -Recurse -Force .angular
+Remove-Item -Recurse -Force dist
+
+# Try again
+npm start
 ```
 
 ### Proxy Configuration

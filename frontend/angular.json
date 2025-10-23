@@ -20,6 +20,16 @@
               "zone.js"
             ],
             "tsConfig": "tsconfig.app.json",
+            "inlineStyleLanguage": "css",
+            "allowedCommonJsDependencies": [],
+            "optimization": {
+              "scripts": true,
+              "styles": {
+                "minify": true,
+                "inlineCritical": false
+              },
+              "fonts": false
+            },
             "assets": [
               "src/favicon.ico",
               "src/assets"
