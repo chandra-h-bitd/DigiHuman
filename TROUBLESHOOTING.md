@@ -61,24 +61,24 @@ npm install
 
 ### SSL Certificate Error (npm start / Font Inlining)
 
-**Error:** `Inlining of fonts failed. An error has occurred while retrieving https://fonts.googleapis.com/icon`
+**Error:** `Inlining of fonts failed` or **Icons not showing**
 
-**This is already fixed!** The app is configured to work without Google Fonts CDN.
-
-If you still see this error:
+**Solution:**
 ```bash
-# Clear Angular cache
 cd frontend
-rm -rf .angular
-rm -rf dist
 
-# Or on Windows
-Remove-Item -Recurse -Force .angular
-Remove-Item -Recurse -Force dist
+# Install material-icons package (already in package.json)
+npm install
 
-# Try again
+# Clear Angular cache if icons still don't show
+Remove-Item -Recurse -Force .angular -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+
+# Start again
 npm start
 ```
+
+**Icons are now loaded from node_modules** - no Google CDN needed!
 
 ### Proxy Configuration
 
