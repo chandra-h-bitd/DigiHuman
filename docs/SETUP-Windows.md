@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 Run the API server:
 ```
-python app/main.py
+python -m app.main
 ```
 
 - The server listens on http://localhost:8000
@@ -102,5 +102,5 @@ Your key is only used in the browser and sent per request; it’s not stored.
 
 ## 7) Stop services
 
-- Backend: Ctrl+C in the PowerShell running `python app/main.py`
+- Backend: Ctrl+C in the PowerShell running `python -m app.main`
 - Frontend: Ctrl+C in the PowerShell running `npm start`

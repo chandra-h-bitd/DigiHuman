@@ -43,7 +43,7 @@ pip install aiohttp
 ### **Step 5: Run the Application**
 ```bash
 # Start the backend server
-python app/main.py
+python -m app.main
 ```
 
 **✅ Done! Your backend is running at http://localhost:8000**
@@ -80,7 +80,7 @@ pip install aiohttp
 ### **Step 4: Run the Application**
 ```bash
 # Start the backend server
-python app/main.py
+python -m app.main
 ```
 
 **✅ Done! Your backend is running at http://localhost:8000**
@@ -117,7 +117,7 @@ pip install aiohttp
 ### **Step 4: Run the Application**
 ```bash
 # Start the backend server
-python app/main.py
+python -m app.main
 ```
 
 **✅ Done! Your backend is running at http://localhost:8000**
@@ -212,7 +212,7 @@ python -m venv venv
 source venv/bin/activate  # Linux/macOS
 venv\Scripts\activate     # Windows
 pip install -r requirements.txt aiohttp
-python app/main.py
+python -m app.main
 ```
 
 ### **Frontend Only:**
@@ -224,7 +224,7 @@ npm start
 
 ### **Both (Terminal 1):**
 ```bash
-cd backend && source venv/bin/activate && pip install -r requirements.txt aiohttp && python app/main.py
+cd backend && source venv/bin/activate && pip install -r requirements.txt aiohttp && python -m app.main
 ```
 
 ### **Both (Terminal 2):**
