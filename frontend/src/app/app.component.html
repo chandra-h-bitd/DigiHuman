@@ -3,7 +3,7 @@
   <!-- Top Navigation Bar -->
   <header class="app-header">
     <div class="header-content">
-      <div class="header-left">
+      <div class="header-left clickable" (click)="backToDashboard()" matTooltip="Go to Dashboard">
         <mat-icon class="header-icon">chat_bubble</mat-icon>
         <h1 class="header-title">{{ title }}</h1>
       </div>
@@ -212,6 +212,23 @@
                     </details>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <!-- Sample Questions (Suggestions) -->
+            <div *ngIf="documents.length > 0 && messages.length === 0" class="sample-questions">
+              <p class="sample-questions-label">
+                <mat-icon>lightbulb_outline</mat-icon>
+                Try asking:
+              </p>
+              <div class="sample-questions-chips">
+                <mat-chip-listbox>
+                  <mat-chip-option *ngFor="let sample of sampleQuestions" 
+                                   (click)="useSampleQuestion(sample)"
+                                   class="sample-question-chip">
+                    {{ sample }}
+                  </mat-chip-option>
+                </mat-chip-listbox>
               </div>
             </div>
 

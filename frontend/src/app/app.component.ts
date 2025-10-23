@@ -70,6 +70,23 @@ export class AppComponent implements OnInit {
   question = '';
   answering = false;
   
+  // Sample questions (suggestions)
+  sampleQuestions = [
+    "What is this document about?",
+    "Summarize the main points",
+    "What are the key findings?",
+    "List all dates mentioned",
+    "Who are the parties involved?",
+    "What are the recommendations?"
+  ];
+  
+  // Use a sample question
+  useSampleQuestion(question: string) {
+    this.question = question;
+    // Optionally auto-submit
+    // this.ask();
+  }
+  
   // Settings
   geminiApiKey = '';
   chatgptApiKey = '';
