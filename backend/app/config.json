@@ -1,23 +1,62 @@
 {
+  "storage_path": "~/.rag-assistant",
+  "retrieval": {
+    "similarity_threshold": 0.3,
+    "default_k": 5,
+    "max_k": 20
+  },
+  "chunking": {
+    "default_chunk_size": 700,
+    "min_chunk_size": 100,
+    "overlap_tokens": 50
+  },
+  "embedding": {
+    "batch_size": 16,
+    "normalize": true
+  },
+  "generation": {
+    "temperature": 0.2,
+    "max_output_tokens": 512
+  },
   "gemini": {
-    "embedding_model": "models/text-embedding-004",
-    "generation_model": "models/gemini-2.5-flash",
+    "embedding_model": "text-embedding-004",
+    "generation_model": "gemini-2.0-flash-exp",
     "available_models": {
-      "embedding": ["models/text-embedding-004", "models/text-embedding-003"],
-      "generation": ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-1.5-pro"]
+      "embedding": [
+        "text-embedding-004",
+        "embedding-001"
+      ],
+      "generation": [
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro"
+      ]
     }
   },
   "openai": {
     "embedding_model": "text-embedding-3-small",
     "generation_model": "gpt-4o-mini",
     "available_models": {
-      "embedding": ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
-      "generation": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]
+      "embedding": [
+        "text-embedding-3-small",
+        "text-embedding-3-large",
+        "text-embedding-ada-002"
+      ],
+      "generation": [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo"
+      ]
     }
   },
   "local_llm": {
+    "dir": null,
     "path": null,
-    "model": null,
-    "dir": null
+    "preferred_models": [
+      "mistral-7b-openorca.gguf2.Q4_0.gguf",
+      "mistral-7b-instruct-v0.1.Q4_0.gguf",
+      "orca-mini-3b-gguf2-q4_0.gguf"
+    ]
   }
 }

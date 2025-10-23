@@ -6,9 +6,7 @@ import os
 import io
 import re
 import uuid
-import json
 import logging
-import threading
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -66,17 +64,6 @@ faiss_manager: FAISSManager = get_faiss_manager()
 STORAGE_PATH = os.path.expanduser("~/.rag-assistant")
 DOCS_PATH = os.path.join(STORAGE_PATH, "docs")
 os.makedirs(DOCS_PATH, exist_ok=True)
-
-# Load configuration
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-with open(CONFIG_PATH, 'r') as f:
-    CONFIG = json.load(f)
-
-# Model names from config
-GEMINI_EMBED_MODEL = CONFIG["gemini"]["embedding_model"]
-GEMINI_GEN_MODEL = CONFIG["gemini"]["generation_model"]
-OPENAI_EMBED_MODEL = CONFIG["openai"]["embedding_model"]
-OPENAI_GEN_MODEL = CONFIG["openai"]["generation_model"]
 
 # Lazy-loaded models
 _sbert_model = None
@@ -161,7 +148,6 @@ class UploadResponse(BaseModel):
     chunks_indexed: int
     used_fallback: bool
     embed_provider: str
-    embedding_model: str  # Specific model name used for embeddings
 
 class QueryRequest(BaseModel):
     session_id: str
@@ -174,8 +160,6 @@ class QueryResponse(BaseModel):
     sources: List[Dict[str, Any]]
     llm_used: str
     used_fallback: bool
-    embedding_model: str  # Specific model used for query embedding
-    llm_model: str  # Specific model used for answer generation
 
 class ConfigSet(BaseModel):
     key_name: str
@@ -437,12 +421,38 @@ def generate_with_chatgpt(prompt: str, api_key: str, model_name: str = "gpt-4o-m
         logger.warning(f"OpenAI generate exception: {e}")
         return None
 
-def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]]) -> Optional[str]:
-    """Generate answer with local LLM - DISABLED for stability, uses heuristic instead"""
-    # Local LLM generation is too slow and can cause timeouts/crashes
-    # Skip directly to heuristic fallback for fast, reliable responses
-    logger.info("Local LLM disabled - using heuristic fallback for speed and reliability")
-    return None  # Will trigger heuristic fallback
+def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]], max_chars: int = 8000) -> Optional[str]:
+    """Generate answer with local LLM"""
+    llm = get_local_llm()
+    if llm is None:
+        return None
+    
+    # Build context
+    parts = []
+    total = 0
+    for i, c in enumerate(chunks):
+        header = f"[Source {i+1} | {c.get('doc','')}#{c.get('chunk',-1)}]\n"
+        body = c.get("text", "").strip()
+        seg = header + body + "\n\n"
+        if total + len(seg) > max_chars:
+            break
+        parts.append(seg)
+        total += len(seg)
+    
+    context = "".join(parts)
+    system = (
+        "You are a helpful assistant. Answer the user's question using only the provided context. "
+        "If the answer is not present, say you don't know. Cite sources as [Source N].\n\n"
+    )
+    prompt = f"{system}Context:\n{context}\nQuestion: {question}\nAnswer:"
+    
+    try:
+        with llm.chat_session():
+            out = llm.generate(prompt, max_tokens=512, temp=0.2)
+        return (out or "").strip() or None
+    except Exception as e:
+        logger.info(f"Local LLM generation failed: {e}")
+        return None
 
 def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
     """Generate a heuristic answer from chunks"""
@@ -638,17 +648,12 @@ async def upload_document(
         vecs = None
         used_fallback = False
         embed_provider = primary_llm
-        embedding_model = ""
         
         # Try primary LLM first
         if primary_llm == "gemini" and gemini_key:
             vecs = embed_with_gemini(texts, gemini_key)
-            if vecs is not None:
-                embedding_model = GEMINI_EMBED_MODEL
         elif primary_llm == "chatgpt" and chatgpt_key:
             vecs = embed_with_chatgpt(texts, chatgpt_key)
-            if vecs is not None:
-                embedding_model = OPENAI_EMBED_MODEL
         
         # Fallback to local SBERT
         if vecs is None:
@@ -656,7 +661,6 @@ async def upload_document(
             if vecs is not None:
                 used_fallback = True
                 embed_provider = "sbert"
-                embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
                 logger.info("Using SBERT fallback for embeddings")
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate embeddings")
@@ -684,8 +688,7 @@ async def upload_document(
             file_name=filename,
             chunks_indexed=len(chunks),
             used_fallback=used_fallback,
-            embed_provider=embed_provider,
-            embedding_model=embedding_model
+            embed_provider=embed_provider
         )
         
     except HTTPException:
@@ -731,22 +734,16 @@ async def query_session(session_id: str, query: QueryRequest):
         # Embed the question
         q_vec = None
         used_fallback = False
-        embedding_model = ""
         
         if primary_llm == "gemini" and gemini_key:
             q_vec = embed_with_gemini([question], gemini_key)
-            if q_vec is not None:
-                embedding_model = GEMINI_EMBED_MODEL
         elif primary_llm == "chatgpt" and chatgpt_key:
             q_vec = embed_with_chatgpt([question], chatgpt_key)
-            if q_vec is not None:
-                embedding_model = OPENAI_EMBED_MODEL
         
         if q_vec is None:
             q_vec = embed_with_sbert([question])
             if q_vec is not None:
                 used_fallback = True
-                embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
                 logger.info("Using SBERT fallback for query embedding")
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate query embedding")
@@ -754,17 +751,13 @@ async def query_session(session_id: str, query: QueryRequest):
         # Search FAISS index
         top_chunks = faiss_manager.search(session_id, q_vec, k=query.k)
         
-        # Check if we have any chunks at all
-        llm_model = ""
-        if not top_chunks:
-            # No chunks found at all - truly out of context
+        # Check if retrieval score is above threshold
+        threshold = 0.3  # Configurable threshold
+        if not top_chunks or (top_chunks and top_chunks[0].get("score", 0) < threshold):
             answer = "I'm sorry, but I couldn't find relevant information in the documents to answer your question. The query appears to be out of context."
             llm_used = "out-of-context"
-            llm_model = "N/A (out of context)"
             sources = []
         else:
-            # We have chunks - try to answer even if similarity is low
-            # This ensures fallback LLM still works with available context
             # Build prompt
             context = "\n\n".join(
                 f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" 
@@ -782,12 +775,8 @@ async def query_session(session_id: str, query: QueryRequest):
             
             if primary_llm == "gemini" and gemini_key:
                 answer = generate_with_gemini(prompt, gemini_key)
-                if answer:
-                    llm_model = GEMINI_GEN_MODEL
             elif primary_llm == "chatgpt" and chatgpt_key:
                 answer = generate_with_chatgpt(prompt, chatgpt_key)
-                if answer:
-                    llm_model = OPENAI_GEN_MODEL
             
             # Fallback to local LLM
             if answer is None:
@@ -795,7 +784,6 @@ async def query_session(session_id: str, query: QueryRequest):
                 if answer:
                     used_fallback = True
                     llm_used = "local-llm"
-                    llm_model = _local_llm_name if _local_llm_name else "local-llm"
                     logger.info("Using local LLM fallback for generation")
             
             # Final fallback to heuristic
@@ -803,7 +791,6 @@ async def query_session(session_id: str, query: QueryRequest):
                 answer = heuristic_answer(question, top_chunks)
                 used_fallback = True
                 llm_used = "heuristic"
-                llm_model = "rule-based-extraction"
                 logger.info("Using heuristic fallback for generation")
             
             sources = top_chunks
@@ -818,9 +805,7 @@ async def query_session(session_id: str, query: QueryRequest):
             answer=answer,
             sources=sources,
             llm_used=llm_used,
-            used_fallback=used_fallback,
-            embedding_model=embedding_model,
-            llm_model=llm_model
+            used_fallback=used_fallback
         )
         
     except HTTPException:
@@ -926,5 +911,5 @@ async def session_diagnostics(session_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main_new:app", host="0.0.0.0", port=8000, reload=False)
 

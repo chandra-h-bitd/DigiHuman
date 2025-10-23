@@ -1,124 +1,302 @@
-<header class="app-header">
-  <div class="left">
-    <span class="app-title">Finquest Q&A</span>
-  </div>
-  <div class="center">
-    <span class="doc-name">{{ uploadedFile?.name || 'No document' }}</span>
-  </div>
-  <div class="right">
-    <button mat-icon-button aria-label="Settings"><mat-icon>settings</mat-icon></button>
-  </div>
-</header>
-
-<div class="layout">
-  <!-- Sidebar -->
-  <aside class="sidebar" [class.collapsed]="!sidebarOpen" aria-label="Sidebar">
-    <!-- API Config -->
-    <section class="section" [class.compact]="apiCollapsed">
-      <div class="section-header" (click)="apiCollapsed = !apiCollapsed" role="button" tabindex="0">
-        <div class="title"><mat-icon>vpn_key</mat-icon> API Config</div>
-        <div class="status-badge" [class.ok]="keyStatus==='valid'">{{ keyStatus==='valid' ? 'Connected' : 'Not configured' }}</div>
+<!-- Main Container -->
+<div class="app-container">
+  <!-- Top Navigation Bar -->
+  <header class="app-header">
+    <div class="header-content">
+      <div class="header-left">
+        <mat-icon class="header-icon">chat_bubble</mat-icon>
+        <h1 class="header-title">{{ title }}</h1>
       </div>
-      <div class="section-body" *ngIf="!apiCollapsed">
-        <!-- Provider Selection -->
-        <div class="input-row">
-          <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Provider</mat-label>
-            <mat-select [(ngModel)]="selectedProvider" (selectionChange)="onProviderChange()">
-              <mat-option value="gemini">Google Gemini</mat-option>
-              <mat-option value="openai">OpenAI</mat-option>
-            </mat-select>
-          </mat-form-field>
+      <div class="header-right">
+        <button mat-icon-button (click)="openSettings()" matTooltip="Settings">
+          <mat-icon>settings</mat-icon>
+        </button>
+        <button mat-icon-button *ngIf="viewMode !== 'dashboard'" (click)="backToDashboard()" matTooltip="Dashboard">
+          <mat-icon>dashboard</mat-icon>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Area -->
+  <main class="app-main">
+    
+    <!-- ========== DASHBOARD VIEW ========== -->
+    <div *ngIf="viewMode === 'dashboard'" class="dashboard-view">
+      <div class="dashboard-container">
+        <div class="dashboard-header">
+          <h2>Sessions</h2>
+          <p class="subtitle">Create and manage your document Q&A sessions</p>
         </div>
-        
-        <!-- API Key -->
-        <div class="input-row">
-          <input class="input" [type]="keyVisible ? 'text' : 'password'" [(ngModel)]="apiKey" [placeholder]="selectedProvider === 'gemini' ? 'Gemini API key' : 'OpenAI API key'" aria-label="API key">
-          <button class="icon-btn" (click)="keyVisible=!keyVisible" [attr.aria-label]="keyVisible ? 'Hide key' : 'Show key'"><mat-icon>{{ keyVisible ? 'visibility_off' : 'visibility' }}</mat-icon></button>
-          <button class="btn" (click)="validateKey()" [disabled]="keyStatus==='checking'">{{ keyStatus==='checking' ? 'Checking…' : 'Validate' }}</button>
-        </div>
-        
-        <!-- Model Selection (shown after validation) -->
-        <div *ngIf="keyStatus==='valid' && availableModels.embedding.length > 0" class="model-selection">
-          <div class="input-row">
-            <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Embedding Model</mat-label>
-              <mat-select [(ngModel)]="selectedEmbeddingModel">
-                <mat-option *ngFor="let model of availableModels.embedding" [value]="model">{{ model }}</mat-option>
-              </mat-select>
-            </mat-form-field>
-          </div>
+
+        <!-- New Session Card -->
+        <mat-card class="new-session-card">
+          <mat-card-content>
+            <h3>Create New Session</h3>
+            <div class="new-session-form">
+              <mat-form-field appearance="outline" class="session-name-field">
+                <mat-label>Session Name</mat-label>
+                <input matInput [(ngModel)]="newSessionName" placeholder="e.g., Q2 Financial Reports" 
+                       (keyup.enter)="createSession()" [disabled]="creatingSession">
+              </mat-form-field>
+              
+              <mat-form-field appearance="outline" class="llm-select-field">
+                <mat-label>Primary LLM</mat-label>
+                <mat-select [(ngModel)]="newSessionLLM" [disabled]="creatingSession">
+                  <mat-option value="gemini">
+                    <mat-icon>auto_awesome</mat-icon> Gemini
+                  </mat-option>
+                  <mat-option value="chatgpt">
+                    <mat-icon>psychology</mat-icon> ChatGPT
+                  </mat-option>
+                </mat-select>
+              </mat-form-field>
+              
+              <button mat-raised-button color="primary" (click)="createSession()" 
+                      [disabled]="creatingSession || !newSessionName.trim()">
+                <mat-icon>add</mat-icon>
+                {{ creatingSession ? 'Creating...' : 'Create Session' }}
+              </button>
+            </div>
+          </mat-card-content>
+        </mat-card>
+
+        <!-- Sessions List -->
+        <div class="sessions-list" *ngIf="!loadingSessions">
+          <mat-card *ngFor="let session of sessions" class="session-card" (click)="openSession(session)">
+            <mat-card-content>
+              <div class="session-card-header">
+                <div class="session-info">
+                  <h3 class="session-title">{{ session.session_name }}</h3>
+                  <div class="session-meta">
+                    <mat-chip class="llm-chip" [style.background-color]="getLLMColor(session.primary_llm)">
+                      <mat-icon>{{ getLLMIcon(session.primary_llm) }}</mat-icon>
+                      {{ session.primary_llm }}
+                    </mat-chip>
+                    <span class="session-date">{{ formatDate(session.last_activity) }}</span>
+                  </div>
+                </div>
+                <button mat-icon-button (click)="deleteSession(session, $event)" matTooltip="Delete Session" 
+                        class="delete-btn">
+                  <mat-icon>delete</mat-icon>
+                </button>
+              </div>
+              <div class="session-stats">
+                <div class="stat">
+                  <mat-icon>description</mat-icon>
+                  <span>{{ session.document_count }} docs</span>
+                </div>
+                <div class="stat">
+                  <mat-icon>chat</mat-icon>
+                  <span>{{ session.conversation_count }} conversations</span>
+                </div>
+              </div>
+            </mat-card-content>
+          </mat-card>
           
-          <div class="input-row">
-            <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Generation Model</mat-label>
-              <mat-select [(ngModel)]="selectedGenerationModel">
-                <mat-option *ngFor="let model of availableModels.generation" [value]="model">{{ model }}</mat-option>
-              </mat-select>
-            </mat-form-field>
+          <div *ngIf="sessions.length === 0" class="empty-state">
+            <mat-icon>inbox</mat-icon>
+            <p>No sessions yet. Create your first session to get started!</p>
           </div>
         </div>
+
+        <div *ngIf="loadingSessions" class="loading-container">
+          <mat-spinner></mat-spinner>
+          <p>Loading sessions...</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== SESSION VIEW ========== -->
+    <div *ngIf="viewMode === 'session' && currentSession" class="session-view">
+      <div class="session-container">
         
-        <div class="helper">Key is only used in this browser and sent per request; it is not stored.</div>
-      </div>
-    </section>
-
-    <!-- Upload -->
-    <section class="section" [class.compact]="uploadCollapsed">
-      <div class="section-header" (click)="uploadCollapsed = !uploadCollapsed" role="button" tabindex="0">
-        <div class="title"><mat-icon>upload_file</mat-icon> Upload</div>
-        <div class="status-badge" [class.ok]="!!uploadedFile">{{ uploadedFile ? 'Uploaded' : 'No file' }}</div>
-      </div>
-      <div class="section-body" *ngIf="!uploadCollapsed">
-        <div class="dropzone" [class.drag-over]="dragOver" (dragover)="onDragOver($event)" (dragleave)="onDragLeave($event)" (drop)="onDrop($event)" (click)="fileInput.click()" role="button" tabindex="0" aria-label="Drag and drop or click to select a PDF or DOCX">
-          <input #fileInput type="file" class="hidden-input" (change)="uploadFile($event)" accept=".pdf,.docx">
-          <mat-icon>cloud_upload</mat-icon>
-          <div>PDF • DOCX (Max 10MB)</div>
-        </div>
-        <div class="file-card" *ngIf="uploadedFile">
-          <mat-icon>description</mat-icon>
-          <div class="meta">
-            <div class="name">{{ uploadedFile.name }}</div>
-            <div class="size">{{ uploadedFile.size/1024 | number:'1.0-0' }} KB</div>
+        <!-- Session Header -->
+        <div class="session-header">
+          <div class="session-info-bar">
+            <button mat-icon-button (click)="backToDashboard()" matTooltip="Back to Dashboard">
+              <mat-icon>arrow_back</mat-icon>
+            </button>
+            <div class="session-title-info">
+              <h2>{{ currentSession.session_name }}</h2>
+              <mat-chip [style.background-color]="getLLMColor(currentSession.primary_llm)">
+                <mat-icon>{{ getLLMIcon(currentSession.primary_llm) }}</mat-icon>
+                {{ currentSession.primary_llm }}
+              </mat-chip>
+            </div>
           </div>
-          <button class="icon-btn" (click)="clearFile()" aria-label="Remove file"><mat-icon>close</mat-icon></button>
         </div>
-        <mat-progress-bar *ngIf="uploading" mode="determinate" [value]="uploadProgress"></mat-progress-bar>
-        <div class="helper" *ngIf="embeddingFallback">Embedding fallback (SBERT) was used</div>
-      </div>
-    </section>
-  </aside>
 
-  <!-- Main Chat -->
-  <main class="main">
-    <div class="empty" *ngIf="messages.length === 0">
-      <mat-icon class="empty-icon">chat</mat-icon>
-      <div class="empty-title">Ask about your document</div>
-      <div class="chips">
-        <button class="chip" *ngFor="let s of suggestedQuestions" (click)="question=s; ask()">{{ s }}</button>
+        <div class="session-content">
+          <!-- Left Sidebar: Documents -->
+          <aside class="documents-sidebar">
+            <div class="sidebar-header">
+              <h3>Documents</h3>
+              <span class="document-count">{{ documents.length }}</span>
+            </div>
+            
+            <!-- Document Upload -->
+            <div class="upload-zone" 
+                 [class.drag-over]="dragOver"
+                 (dragover)="onDragOver($event)" 
+                 (dragleave)="onDragLeave($event)" 
+                 (drop)="onDrop($event)">
+              <mat-icon>cloud_upload</mat-icon>
+              <p>Drag & drop files here</p>
+              <p class="upload-hint">or</p>
+              <input type="file" #fileInput (change)="onFileSelected($event)" 
+                     accept=".pdf,.docx,.txt,.md,.markdown" style="display: none;">
+              <button mat-raised-button color="primary" (click)="fileInput.click()" 
+                      [disabled]="uploading">
+                <mat-icon>add</mat-icon>
+                Upload Document
+              </button>
+            </div>
+
+            <!-- Upload Progress -->
+            <div *ngIf="uploading" class="upload-progress">
+              <p class="upload-filename">{{ currentDocument }}</p>
+              <mat-progress-bar mode="determinate" [value]="uploadProgress"></mat-progress-bar>
+              <p class="upload-percent">{{ uploadProgress }}%</p>
+            </div>
+
+            <!-- Documents List -->
+            <mat-list class="documents-list">
+              <mat-list-item *ngFor="let doc of documents">
+                <mat-icon matListItemIcon>description</mat-icon>
+                <div matListItemTitle>{{ doc.file_name }}</div>
+                <div matListItemLine>{{ doc.chunk_count }} chunks • {{ formatDate(doc.uploaded_at) }}</div>
+              </mat-list-item>
+              
+              <div *ngIf="documents.length === 0 && !uploading" class="empty-documents">
+                <p>No documents yet. Upload your first document to start asking questions!</p>
+              </div>
+            </mat-list>
+          </aside>
+
+          <!-- Main Chat Area -->
+          <div class="chat-area">
+            <!-- Messages -->
+            <div class="messages-container">
+              <div *ngIf="messages.length === 0" class="empty-chat">
+                <mat-icon>chat_bubble_outline</mat-icon>
+                <h3>Start a Conversation</h3>
+                <p>Upload documents and ask questions about them</p>
+              </div>
+
+              <div *ngFor="let msg of messages" class="message" [class.user-message]="msg.role === 'user'" 
+                   [class.assistant-message]="msg.role === 'assistant'">
+                <div class="message-content">
+                  <div class="message-header">
+                    <mat-icon class="message-icon">
+                      {{ msg.role === 'user' ? 'person' : getLLMIcon(msg.llm_used) }}
+                    </mat-icon>
+                    <span class="message-role">{{ msg.role === 'user' ? 'You' : 'Assistant' }}</span>
+                    <span class="message-time">{{ formatTime(msg.created_at) }}</span>
+                    <mat-chip *ngIf="msg.llm_used" class="llm-badge" 
+                             [style.background-color]="getLLMColor(msg.llm_used)">
+                      {{ msg.llm_used }}
+                    </mat-chip>
+                  </div>
+                  <div class="message-text" [innerHTML]="renderMarkdown(msg.text)"></div>
+                  
+                  <!-- Sources -->
+                  <div *ngIf="msg.sources && msg.sources.length > 0" class="message-sources">
+                    <details>
+                      <summary>{{ msg.sources.length }} source(s)</summary>
+                      <div class="source-item" *ngFor="let source of msg.sources; let i = index">
+                        <strong>[Source {{ i + 1 }}]</strong>
+                        <p>{{ source.doc }} (chunk {{ source.chunk }})</p>
+                        <p class="source-text">{{ source.text.substring(0, 200) }}...</p>
+                      </div>
+                    </details>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-area">
+              <mat-form-field appearance="outline" class="question-field">
+                <mat-label>Ask a question...</mat-label>
+                <textarea matInput [(ngModel)]="question" (keydown.enter)="$event.shiftKey || ask(); $event.preventDefault()"
+                          [disabled]="answering || documents.length === 0" rows="3"></textarea>
+                <mat-hint *ngIf="documents.length === 0">Upload documents to start asking questions</mat-hint>
+              </mat-form-field>
+              <button mat-raised-button color="primary" (click)="ask()" 
+                      [disabled]="answering || !question.trim() || documents.length === 0">
+                <mat-icon>{{ answering ? 'hourglass_empty' : 'send' }}</mat-icon>
+                {{ answering ? 'Answering...' : 'Ask' }}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="messages" *ngIf="messages.length > 0" aria-live="polite">
-      <div class="msg" *ngFor="let m of messages" [class.user]="m.role==='user'" [class.assistant]="m.role==='assistant'">
-        <div class="meta-row">
-          <span class="who">{{ m.role==='user' ? 'You' : 'Assistant' }}</span>
-          <span class="time" *ngIf="m.ts">{{ formatTime(m.ts) }}</span>
+    <!-- ========== SETTINGS VIEW ========== -->
+    <div *ngIf="viewMode === 'settings'" class="settings-view">
+      <div class="settings-container">
+        <div class="settings-header">
+          <h2>Settings</h2>
+          <p class="subtitle">Configure API keys and preferences</p>
         </div>
-        <div class="text" *ngIf="m.role==='user'">{{ m.text }}</div>
-        <div class="text" *ngIf="m.role==='assistant'" [innerHTML]="renderMarkdown(m.text)"></div>
-        <div class="sources" *ngIf="m.sources?.length && m.role==='assistant'">
-          <div class="src" *ngFor="let s of m.sources; let i=index">[{{i+1}}] {{ s.doc }}#{{ s.chunk }} · {{ s.score | number:'1.2-2' }}</div>
-          <div class="src warn" *ngIf="m.fallback">Used fallback</div>
-        </div>
-        <div class="sep"></div>
+
+        <mat-card class="settings-card">
+          <mat-card-content>
+            <h3>API Keys</h3>
+            <p class="settings-description">
+              Enter your API keys to enable Gemini and ChatGPT providers. 
+              Keys are stored locally and never shared.
+            </p>
+
+            <div class="api-key-form">
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>Gemini API Key</mat-label>
+                <input matInput [(ngModel)]="geminiApiKey" type="password" 
+                       placeholder="Enter your Gemini API key">
+                <mat-icon matPrefix>auto_awesome</mat-icon>
+              </mat-form-field>
+
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>ChatGPT API Key</mat-label>
+                <input matInput [(ngModel)]="chatgptApiKey" type="password" 
+                       placeholder="Enter your OpenAI API key">
+                <mat-icon matPrefix>psychology</mat-icon>
+              </mat-form-field>
+
+              <div class="settings-actions">
+                <button mat-raised-button color="primary" (click)="saveSettings()" 
+                        [disabled]="savingSettings">
+                  <mat-icon>save</mat-icon>
+                  {{ savingSettings ? 'Saving...' : 'Save Settings' }}
+                </button>
+                <button mat-button (click)="backToDashboard()">
+                  <mat-icon>cancel</mat-icon>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </mat-card-content>
+        </mat-card>
+
+        <mat-card class="info-card">
+          <mat-card-content>
+            <h3>About</h3>
+            <p>
+              <strong>FINQUEST AI</strong> - An intelligent multi-session RAG (Retrieval-Augmented Generation) document assistant.
+              You can create multiple sessions, upload documents, and ask questions about them.
+            </p>
+            <ul>
+              <li>Supports PDF, DOCX, TXT, and Markdown files</li>
+              <li>Uses FAISS for efficient vector search</li>
+              <li>Persists data across sessions with TinyDB</li>
+              <li>Automatic fallback to local LLM if API fails</li>
+            </ul>
+          </mat-card-content>
+        </mat-card>
       </div>
-      <div class="typing" *ngIf="answering"><span></span><span></span><span></span></div>
     </div>
 
-    <div class="input-bar">
-      <textarea class="input" cdkTextareaAutosize [(ngModel)]="question" (keyup.enter)="ask()" rows="1" placeholder="Ask a question…" aria-label="Type your question"></textarea>
-      <button class="send" (click)="ask()" [disabled]="!question.trim()"><mat-icon>send</mat-icon></button>
-    </div>
   </main>
 </div>

@@ -1,71 +1,149 @@
 import { Injectable } from '@angular/core';
-import { HttpClient, HttpEvent } from '@angular/common/http';
+import { HttpClient, HttpParams, HttpEventType } from '@angular/common/http';
 import { Observable } from 'rxjs';
 
-export interface ProviderConfig {
-  provider: string;
-  apiKey: string;
-  embeddingModel?: string;
-  generationModel?: string;
+export interface Session {
+  session_id: string;
+  session_name: string;
+  primary_llm: string;
+  created_at: string;
+  last_activity: string;
+  document_count: number;
+  conversation_count: number;
 }
 
-export interface ModelsResponse {
-  provider: string;
-  embedding_model?: string;
-  generation_model?: string;
-  available_models: {
-    embedding: string[];
-    generation: string[];
-  };
-  api_valid: boolean;
-  error_message?: string;
+export interface Document {
+  document_id: string;
+  session_id: string;
+  file_name: string;
+  file_type: string;
+  file_path: string;
+  chunk_count: number;
+  uploaded_at: string;
 }
 
-@Injectable({ providedIn: 'root' })
+export interface Conversation {
+  conversation_id: string;
+  session_id: string;
+  query: string;
+  response: string;
+  llm_used: string;
+  sources: any[];
+  created_at: string;
+}
+
+export interface UploadResponse {
+  document_id: string;
+  session_id: string;
+  file_name: string;
+  chunks_indexed: number;
+  used_fallback: boolean;
+  embed_provider: string;
+}
+
+export interface QueryResponse {
+  conversation_id: string;
+  answer: string;
+  sources: any[];
+  llm_used: string;
+  used_fallback: boolean;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
 export class ApiService {
-  backendUrl = 'http://localhost:8000';
+  private baseUrl = 'http://localhost:8000';
+
   constructor(private http: HttpClient) {}
 
-  upload(file: File, sessionId?: string, config?: ProviderConfig): Observable<HttpEvent<any>> {
-    const form = new FormData();
-    form.append('file', file);
-    if (sessionId) form.append('session_id', sessionId);
-    if (config) {
-      form.append('provider', config.provider);
-      if (config.apiKey) form.append('api_key', config.apiKey);
-      if (config.embeddingModel) form.append('embedding_model', config.embeddingModel);
-      if (config.generationModel) form.append('generation_model', config.generationModel);
-    }
-    return this.http.post(`${this.backendUrl}/upload`, form, { observe: 'events', reportProgress: true });
-  }
+  // ========== Session Management ==========
 
-  ask(sessionId: string, question: string, config?: ProviderConfig, k: number = 5) {
-    const body: any = { 
-      session_id: sessionId, 
-      question, 
-      k
-    };
-    if (config) {
-      body.provider = config.provider;
-      body.api_key = config.apiKey || null;
-      body.embedding_model = config.embeddingModel || null;
-      body.generation_model = config.generationModel || null;
-    }
-    return this.http.post(`${this.backendUrl}/ask`, body);
-  }
-
-  models(provider: string = 'gemini', apiKey?: string): Observable<ModelsResponse> {
-    const params: any = { provider };
-    if (apiKey) params.api_key = apiKey;
-    return this.http.get<ModelsResponse>(`${this.backendUrl}/models`, { params });
-  }
-
-  validateProvider(config: ProviderConfig): Observable<ModelsResponse> {
-    return this.http.post<ModelsResponse>(`${this.backendUrl}/validate`, {
-      provider: config.provider,
-      api_key: config.apiKey,
-      embedding_model: config.embeddingModel || null,
-      generation_model: config.generationModel || null
+  createSession(sessionName: string, primaryLlm: string = 'gemini'): Observable<Session> {
+    return this.http.post<Session>(`${this.baseUrl}/sessions`, {
+      session_name: sessionName,
+      primary_llm: primaryLlm
     });
+  }
+
+  listSessions(): Observable<Session[]> {
+    return this.http.get<Session[]>(`${this.baseUrl}/sessions`);
+  }
+
+  getSession(sessionId: string): Observable<Session> {
+    return this.http.get<Session>(`${this.baseUrl}/sessions/${sessionId}`);
+  }
+
+  updateSession(sessionId: string, updates: { session_name?: string; primary_llm?: string }): Observable<any> {
+    return this.http.put(`${this.baseUrl}/sessions/${sessionId}`, updates);
+  }
+
+  deleteSession(sessionId: string): Observable<any> {
+    return this.http.delete(`${this.baseUrl}/sessions/${sessionId}`);
+  }
+
+  // ========== Document Management ==========
+
+  uploadDocument(sessionId: string, file: File): Observable<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    return this.http.post(`${this.baseUrl}/sessions/${sessionId}/upload`, formData, {
+      reportProgress: true,
+      observe: 'events'
+    });
+  }
+
+  listDocuments(sessionId: string): Observable<Document[]> {
+    return this.http.get<Document[]>(`${this.baseUrl}/sessions/${sessionId}/documents`);
+  }
+
+  // ========== Query / Conversation ==========
+
+  query(sessionId: string, question: string, k: number = 5): Observable<QueryResponse> {
+    return this.http.post<QueryResponse>(`${this.baseUrl}/sessions/${sessionId}/query`, {
+      session_id: sessionId,
+      question: question,
+      k: k
+    });
+  }
+
+  getConversations(sessionId: string, limit?: number): Observable<Conversation[]> {
+    let params = new HttpParams();
+    if (limit) {
+      params = params.set('limit', limit.toString());
+    }
+    return this.http.get<Conversation[]>(`${this.baseUrl}/sessions/${sessionId}/conversations`, { params });
+  }
+
+  // ========== Configuration / API Keys ==========
+
+  setConfig(keyName: string, keyValue: any): Observable<any> {
+    return this.http.post(`${this.baseUrl}/config`, {
+      key_name: keyName,
+      key_value: keyValue
+    });
+  }
+
+  getConfig(keyName: string): Observable<any> {
+    return this.http.get(`${this.baseUrl}/config/${keyName}`);
+  }
+
+  getAllConfig(): Observable<any> {
+    return this.http.get(`${this.baseUrl}/config`);
+  }
+
+  deleteConfig(keyName: string): Observable<any> {
+    return this.http.delete(`${this.baseUrl}/config/${keyName}`);
+  }
+
+  // ========== Diagnostics ==========
+
+  getSessionDiagnostics(sessionId: string): Observable<any> {
+    return this.http.get(`${this.baseUrl}/sessions/${sessionId}/diagnostics`);
+  }
+
+  health(): Observable<any> {
+    return this.http.get(`${this.baseUrl}/health`);
   }
 }
