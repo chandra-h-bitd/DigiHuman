@@ -23,13 +23,34 @@ A powerful RAG (Retrieval-Augmented Generation) document Q&A system with multi-s
 - Node.js 18+
 - 8GB RAM (16GB recommended)
 
-### Installation
+### ⚡ One-Click Installation (Recommended)
+
+**Windows:**
+```bash
+# Just run this - handles everything automatically!
+install.bat
+```
+
+**Linux/Mac:**
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+**What it does:**
+- ✅ Detects corporate network and configures SSL automatically
+- ✅ Installs all backend dependencies
+- ✅ Installs all frontend dependencies
+- ✅ Handles SSL certificate issues
+- ✅ Optionally starts both services
+
+### 📖 Manual Installation
 
 **1. Backend Setup:**
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate  # Windows
+venv\Scripts\activate  # Windows (or source venv/bin/activate on Linux/Mac)
 pip install -r requirements.txt
 python -m app.main
 ```
@@ -37,6 +58,11 @@ python -m app.main
 **2. Frontend Setup:**
 ```bash
 cd frontend
+
+# If on company network, first run:
+npm config set strict-ssl false
+
+# Then install
 npm install
 npm start
 ```
@@ -44,26 +70,6 @@ npm start
 **3. Access Application:**
 - Frontend: `http://localhost:4200`
 - Backend API: `http://localhost:8000`
-
-### Quick Setup Scripts
-
-**Windows:**
-```bash
-# Backend
-cd backend
-start_windows.bat
-
-# Frontend  
-cd frontend
-start_windows.bat
-```
-
-**Linux/Mac:**
-```bash
-chmod +x backend/start_linux.sh frontend/start_linux.sh
-./backend/start_linux.sh
-./frontend/start_linux.sh
-```
 
 ## ⚙️ Configuration
 

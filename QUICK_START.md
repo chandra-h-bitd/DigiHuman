@@ -10,6 +10,35 @@ Get FINQUEST AI running in 5 minutes!
 
 ## 🚀 Installation
 
+### ⚡ Option 1: One-Click Installation (Recommended)
+
+**Just run this and you're done!**
+
+**Windows:**
+```bash
+install.bat
+```
+
+**Linux/Mac:**
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+**What it does:**
+- Detects if you're on a corporate network
+- Automatically configures SSL if needed
+- Installs all dependencies (backend + frontend)
+- Optionally starts both services
+
+**That's it!** Skip to [Step 3: Access Application](#step-3-access-application)
+
+---
+
+### 📖 Option 2: Manual Installation
+
+**Only use this if you want to install step-by-step**
+
 ### Step 1: Backend Setup
 
 ```bash
@@ -45,6 +74,9 @@ INFO:     Application startup complete.
 ```bash
 # Navigate to frontend
 cd frontend
+
+# If on company network (SSL issues):
+npm config set strict-ssl false
 
 # Install dependencies
 npm install
