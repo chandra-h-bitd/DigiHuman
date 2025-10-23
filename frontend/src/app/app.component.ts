@@ -73,6 +73,7 @@ export class AppComponent implements OnInit {
   // Settings
   geminiApiKey = '';
   chatgptApiKey = '';
+  groqApiKey = '';
   savingSettings = false;
   
   // UI state
@@ -338,6 +339,9 @@ export class AppComponent implements OnInit {
         if (config.chatgpt_api_key) {
           this.chatgptApiKey = config.chatgpt_api_key;
         }
+        if (config.groq_api_key) {
+          this.groqApiKey = config.groq_api_key;
+        }
       },
       error: (err) => {
         console.error('Failed to load settings:', err);
@@ -354,6 +358,9 @@ export class AppComponent implements OnInit {
     }
     if (this.chatgptApiKey.trim()) {
       saves.push(this.api.setConfig('chatgpt_api_key', this.chatgptApiKey.trim()));
+    }
+    if (this.groqApiKey.trim()) {
+      saves.push(this.api.setConfig('groq_api_key', this.groqApiKey.trim()));
     }
 
     if (saves.length === 0) {

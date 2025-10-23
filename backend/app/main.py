@@ -447,12 +447,16 @@ def generate_with_groq(prompt: str, api_key: Optional[str] = None) -> Optional[s
     if not api_key:
         # Try to get from database
         api_key = db.get_config("groq_api_key")
+        logger.info(f"Retrieved Groq API key from DB: {'YES' if api_key else 'NO'}")
     
     if not api_key:
         logger.info("No Groq API key - skipping Groq fallback")
         return None
     
     try:
+        logger.info(f"Attempting Groq API call with model: {GROQ_GEN_MODEL}")
+        logger.info(f"Groq API URL: {GROQ_API_URL}")
+        
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -469,16 +473,19 @@ def generate_with_groq(prompt: str, api_key: Optional[str] = None) -> Optional[s
         
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=10)
         
+        logger.info(f"Groq API response status: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.info(f"✅ Groq API success! Got {len(content)} chars")
             return content.strip() or None
         else:
-            logger.warning(f"Groq API error: {response.status_code}")
+            logger.warning(f"Groq API error: {response.status_code} - {response.text[:200]}")
             return None
             
     except Exception as e:
-        logger.warning(f"Groq generation failed: {e}")
+        logger.warning(f"Groq generation failed: {type(e).__name__}: {e}")
         return None
 
 def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]]) -> Optional[str]:
@@ -820,7 +827,19 @@ async def query_session(session_id: str, query: QueryRequest):
                 raise HTTPException(status_code=500, detail="Failed to generate query embedding")
         
         # Search FAISS index
-        top_chunks = faiss_manager.search(session_id, q_vec, k=query.k)
+        try:
+            top_chunks = faiss_manager.search(session_id, q_vec, k=query.k)
+        except ValueError as e:
+            # Dimension mismatch - provide helpful error message
+            if "Dimension mismatch" in str(e):
+                error_detail = (
+                    "Embedding model mismatch detected. Your documents were uploaded with a different "
+                    "embedding model than what's currently being used for queries. "
+                    "Please either: (1) Set your original API key back, or (2) Delete and re-upload "
+                    "your documents with the current settings."
+                )
+                raise HTTPException(status_code=400, detail=error_detail)
+            raise
         
         # Check if we have any chunks at all
         llm_model = ""
@@ -894,7 +913,9 @@ async def query_session(session_id: str, query: QueryRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to query session: {e}")
+        logger.error(f"Failed to query session: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to query session: {str(e)}")
 
 @app.get("/sessions/{session_id}/conversations")

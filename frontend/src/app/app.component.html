@@ -246,8 +246,12 @@
           <mat-card-content>
             <h3>API Keys</h3>
             <p class="settings-description">
-              Enter your API keys to enable Gemini and ChatGPT providers. 
+              Enter your API keys to enable Gemini, ChatGPT, and Groq providers. 
               Keys are stored locally and never shared.
+            </p>
+            <p class="settings-tip">
+              💡 <strong>Tip:</strong> Get a <strong>FREE Groq API key</strong> for fast, intelligent fallback! 
+              Visit <a href="https://console.groq.com" target="_blank">console.groq.com</a>
             </p>
 
             <div class="api-key-form">
@@ -263,6 +267,14 @@
                 <input matInput [(ngModel)]="chatgptApiKey" type="password" 
                        placeholder="Enter your OpenAI API key">
                 <mat-icon matPrefix>psychology</mat-icon>
+              </mat-form-field>
+
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>Groq API Key (Free Fallback LLM)</mat-label>
+                <input matInput [(ngModel)]="groqApiKey" type="password" 
+                       placeholder="Enter your Groq API key (FREE - get from console.groq.com)">
+                <mat-icon matPrefix>bolt</mat-icon>
+                <mat-hint>FREE & FAST! Get your key at https://console.groq.com</mat-hint>
               </mat-form-field>
 
               <div class="settings-actions">
@@ -291,7 +303,7 @@
               <li>Supports PDF, DOCX, TXT, and Markdown files</li>
               <li>Uses FAISS for efficient vector search</li>
               <li>Persists data across sessions with TinyDB</li>
-              <li>Automatic fallback to local LLM if API fails</li>
+              <li>Automatic fallback to Groq LLM if API fails (fast & free!)</li>
             </ul>
           </mat-card-content>
         </mat-card>

@@ -51,11 +51,12 @@
     }
   },
   "groq": {
-    "generation_model": "llama3-70b-8192",
+    "generation_model": "llama-3.1-8b-instant",
     "available_models": [
-      "llama3-70b-8192",
-      "llama3-8b-8192",
-      "mixtral-8x7b-32768"
+      "llama-3.1-8b-instant",
+      "llama3-groq-70b-8192-tool-use-preview",
+      "mixtral-8x7b-32768",
+      "gemma2-9b-it"
     ],
     "api_url": "https://api.groq.com/openai/v1/chat/completions"
   },

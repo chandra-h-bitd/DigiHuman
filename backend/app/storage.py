@@ -158,6 +158,22 @@ class FAISSManager:
             logger.warning(f"Index for session {session_id} is empty")
             return []
         
+        # Check dimension compatibility
+        query_dim = query_vector.shape[1]
+        index_dim = index.d
+        if query_dim != index_dim:
+            error_msg = (
+                f"Dimension mismatch! Query vector dimension ({query_dim}) "
+                f"does not match index dimension ({index_dim}). "
+                f"This typically happens when:\n"
+                f"  - Documents were uploaded with one embedding model (e.g., Gemini: 768D)\n"
+                f"  - Query is using a different embedding model (e.g., SBERT: 384D)\n"
+                f"Solution: Re-upload your documents with the current embedding model, "
+                f"or restore the original API key."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
         # Normalize query vector if using cosine similarity
         query = query_vector.copy()
         if normalize:
