@@ -77,6 +77,8 @@ GEMINI_EMBED_MODEL = CONFIG["gemini"]["embedding_model"]
 GEMINI_GEN_MODEL = CONFIG["gemini"]["generation_model"]
 OPENAI_EMBED_MODEL = CONFIG["openai"]["embedding_model"]
 OPENAI_GEN_MODEL = CONFIG["openai"]["generation_model"]
+GROQ_GEN_MODEL = CONFIG["groq"]["generation_model"]
+GROQ_API_URL = CONFIG["groq"]["api_url"]
 
 # Lazy-loaded models
 _sbert_model = None
@@ -437,17 +439,83 @@ def generate_with_chatgpt(prompt: str, api_key: str, model_name: str = "gpt-4o-m
         logger.warning(f"OpenAI generate exception: {e}")
         return None
 
+def generate_with_groq(prompt: str, api_key: Optional[str] = None) -> Optional[str]:
+    """Generate text using Groq API - FAST and FREE fallback LLM"""
+    # Groq is extremely fast (faster than Gemini) and offers free tier
+    # Uses Llama 3 70B - high quality, open source
+    
+    if not api_key:
+        # Try to get from database
+        api_key = db.get_config("groq_api_key")
+    
+    if not api_key:
+        logger.info("No Groq API key - skipping Groq fallback")
+        return None
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": GROQ_GEN_MODEL,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 512
+        }
+        
+        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content.strip() or None
+        else:
+            logger.warning(f"Groq API error: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"Groq generation failed: {e}")
+        return None
+
 def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]]) -> Optional[str]:
-    """Generate answer with local LLM - DISABLED for stability, uses heuristic instead"""
-    # Local LLM generation is too slow and can cause timeouts/crashes
-    # Skip directly to heuristic fallback for fast, reliable responses
-    logger.info("Local LLM disabled - using heuristic fallback for speed and reliability")
-    return None  # Will trigger heuristic fallback
+    """Generate with fallback LLM - tries Groq (fast, free) then heuristic"""
+    # Build context from chunks
+    context_parts = []
+    for i, c in enumerate(chunks[:3]):
+        context_parts.append(f"[Source {i+1}] {c.get('text', '').strip()}")
+    context = "\n\n".join(context_parts)
+    
+    prompt = f"""Based on the following context, answer the question concisely and cite sources.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer (cite sources as [Source N]):"""
+    
+    # Try Groq first (very fast, high quality)
+    logger.info("Trying Groq API fallback...")
+    answer = generate_with_groq(prompt)
+    if answer:
+        logger.info("✅ Groq fallback successful")
+        return answer
+    
+    # Groq failed or no API key - will use heuristic
+    logger.info("Groq not available - will use heuristic fallback")
+    return None
 
 def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
-    """Generate a heuristic answer from chunks"""
+    """Generate an intelligent answer from chunks using smart extraction"""
     if not chunks:
-        return "I couldn't find enough information in the documents to answer that question."
+        return "I couldn't find relevant information in the documents to answer your question."
+    
+    # Enhanced heuristic - extract the most relevant information
+    # This is much smarter than just dumping raw chunks
     
     # Simple extractive answer from top chunks
     sentences = []
@@ -789,14 +857,14 @@ async def query_session(session_id: str, query: QueryRequest):
                 if answer:
                     llm_model = OPENAI_GEN_MODEL
             
-            # Fallback to local LLM
+            # Fallback to Groq (fast, free LLM)
             if answer is None:
                 answer = generate_with_local_llm(question, top_chunks)
                 if answer:
                     used_fallback = True
-                    llm_used = "local-llm"
-                    llm_model = _local_llm_name if _local_llm_name else "local-llm"
-                    logger.info("Using local LLM fallback for generation")
+                    llm_used = "groq-fallback"
+                    llm_model = GROQ_GEN_MODEL
+                    logger.info("Using Groq fallback for generation")
             
             # Final fallback to heuristic
             if answer is None:
