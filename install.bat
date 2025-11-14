@@ -53,8 +53,8 @@ echo [3/4] Upgrading pip and setuptools...
 python -m pip install --upgrade pip setuptools --quiet
 
 echo.
-echo [4/4] Installing Python dependencies...
-pip install -r requirements.txt --quiet
+echo [4/4] Installing Python dependencies with detailed reporting...
+python install_dependencies.py
 
 if %errorlevel% equ 0 (
     echo   [OK] Backend dependencies installed
