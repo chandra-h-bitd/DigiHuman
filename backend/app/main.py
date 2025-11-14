@@ -31,22 +31,41 @@ from rank_bm25 import BM25Okapi
 from .db import get_db, Database
 from .storage import get_faiss_manager, FAISSManager
 
+# Logging setup (must be before NLTK downloads to use logger)
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
+
 # Ensure NLTK data
+# Fix SSL certificate issues for NLTK downloads (corporate networks)
+import ssl
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+    logger.info("SSL verification disabled for NLTK downloads (corporate network fix)")
+
+# Download NLTK data with SSL fix
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
-    nltk.download('punkt')
+    try:
+        nltk.download('punkt', quiet=True)
+        logger.info("NLTK punkt tokenizer downloaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to download NLTK punkt: {e}")
+        logger.warning("NLTK punkt will be downloaded on first use (may cause delays)")
+
 try:
     nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
     try:
-        nltk.download('punkt_tab')
-    except Exception:
-        pass
-
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
-logger = logging.getLogger(__name__)
+        nltk.download('punkt_tab', quiet=True)
+        logger.info("NLTK punkt_tab tokenizer downloaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to download NLTK punkt_tab: {e}")
+        # punkt_tab is optional, so we can continue without it
 
 # FastAPI app
 app = FastAPI(title="FINQUEST AI")
