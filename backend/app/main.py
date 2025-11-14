@@ -9,7 +9,7 @@ import uuid
 import json
 import logging
 import threading
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
@@ -25,6 +25,7 @@ from nltk.tokenize import sent_tokenize
 
 import numpy as np
 import requests
+from rank_bm25 import BM25Okapi
 
 # Import our custom modules
 from .db import get_db, Database
@@ -86,16 +87,17 @@ _local_llm = None
 _local_llm_name: Optional[str] = None
 
 def get_sbert():
-    """Lazy-load SBERT model for embeddings"""
+    """Lazy-load SBERT model for embeddings - using 768D model to match Gemini"""
     global _sbert_model
     if _sbert_model is not None:
         return _sbert_model
     
     try:
-        logger.info("🔄 Loading SBERT model for fallback embeddings...")
+        logger.info("🔄 Loading SBERT model for fallback embeddings (768D)...")
         from sentence_transformers import SentenceTransformer
-        _sbert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-        logger.info("✅ SBERT model loaded successfully")
+        # Using all-mpnet-base-v2 (768D) to match Gemini embedding dimension
+        _sbert_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+        logger.info("✅ SBERT model loaded successfully (768D)")
         return _sbert_model
     except Exception as e:
         logger.error(f"❌ Failed to load SBERT model: {e}")
@@ -488,8 +490,32 @@ def generate_with_groq(prompt: str, api_key: Optional[str] = None) -> Optional[s
         logger.warning(f"Groq generation failed: {type(e).__name__}: {e}")
         return None
 
-def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]]) -> Optional[str]:
-    """Generate with fallback LLM - tries Groq (fast, free) then heuristic"""
+def generate_with_ollama(prompt: str, model: str = "llama3") -> Optional[str]:
+    """Generate text using Ollama (local LLM)"""
+    try:
+        import ollama
+    except ImportError:
+        logger.info("Ollama not available (pip install ollama)")
+        return None
+    
+    try:
+        logger.info(f"Trying Ollama with model: {model}")
+        response = ollama.generate(model=model, prompt=prompt, options={
+            "temperature": 0.2,
+            "num_predict": 512
+        })
+        answer = response.get("response", "").strip()
+        if answer:
+            logger.info("✅ Ollama generation successful")
+            return answer
+        return None
+    except Exception as e:
+        logger.warning(f"Ollama generation failed: {e}")
+        return None
+
+def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """Generate with fallback LLM - tries Groq, then Ollama, then heuristic
+    Returns: (answer, provider) where provider is 'groq', 'ollama', or None"""
     # Build context from chunks
     context_parts = []
     for i, c in enumerate(chunks[:3]):
@@ -510,28 +536,73 @@ Answer (cite sources as [Source N]):"""
     answer = generate_with_groq(prompt)
     if answer:
         logger.info("✅ Groq fallback successful")
-        return answer
+        return answer, "groq"
     
-    # Groq failed or no API key - will use heuristic
-    logger.info("Groq not available - will use heuristic fallback")
-    return None
+    # Try Ollama (local LLM, privacy-focused)
+    logger.info("Trying Ollama fallback...")
+    answer = generate_with_ollama(prompt)
+    if answer:
+        logger.info("✅ Ollama fallback successful")
+        return answer, "ollama"
+    
+    # Both failed - will use heuristic
+    logger.info("Groq and Ollama not available - will use heuristic fallback")
+    return None, None
 
 def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
-    """Generate an intelligent answer from chunks using smart extraction"""
+    """Generate an intelligent answer from chunks using BM25 + smart extraction"""
     if not chunks:
         return "I couldn't find relevant information in the documents to answer your question."
     
-    # Enhanced heuristic - extract the most relevant information
-    # This is much smarter than just dumping raw chunks
+    # Use BM25 for better keyword matching
+    try:
+        # Tokenize question and chunks
+        question_tokens = question.lower().split()
+        
+        # Prepare corpus for BM25
+        corpus = []
+        chunk_texts = []
+        for chunk in chunks:
+            text = chunk.get("text", "")
+            chunk_texts.append(text)
+            # Simple tokenization for BM25
+            tokens = text.lower().split()
+            corpus.append(tokens)
+        
+        if corpus and question_tokens:
+            # Create BM25 index
+            bm25 = BM25Okapi(corpus)
+            # Get BM25 scores
+            scores = bm25.get_scores(question_tokens)
+            
+            # Sort chunks by BM25 score
+            scored_chunks = list(zip(chunks, scores, chunk_texts))
+            scored_chunks.sort(key=lambda x: x[1], reverse=True)
+            
+            # Use top 3 chunks based on BM25
+            top_chunks = scored_chunks[:3]
+        else:
+            # Fallback to original order if BM25 fails
+            top_chunks = [(chunks[i], 0, chunk_texts[i]) for i in range(min(3, len(chunks)))]
+    except Exception as e:
+        logger.warning(f"BM25 processing failed, using simple extraction: {e}")
+        # Fallback to simple extraction
+        top_chunks = [(chunks[i], 0, chunks[i].get("text", "")) for i in range(min(3, len(chunks)))]
     
-    # Simple extractive answer from top chunks
+    # Extract relevant sentences from top chunks
     sentences = []
-    for i, chunk in enumerate(chunks[:3]):
-        text = chunk.get("text", "")
+    for idx, (chunk, score, text) in enumerate(top_chunks):
         sents = sent_tokenize(text)
-        for s in sents[:2]:
+        # Prioritize sentences that contain question keywords
+        question_words = set(question.lower().split())
+        for s in sents:
             if len(s.split()) > 5:
-                sentences.append(f"{s} [Source {i+1}]")
+                sent_words = set(s.lower().split())
+                # Check if sentence contains question keywords
+                if question_words.intersection(sent_words) or idx == 0:
+                    sentences.append(f"{s} [Source {idx+1}]")
+                    if len(sentences) >= 5:
+                        break
     
     if not sentences:
         return "I couldn't find enough information in the documents to answer that question."
@@ -731,7 +802,7 @@ async def upload_document(
             if vecs is not None:
                 used_fallback = True
                 embed_provider = "sbert"
-                embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+                embedding_model = "sentence-transformers/all-mpnet-base-v2"
                 logger.info("Using SBERT fallback for embeddings")
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate embeddings")
@@ -821,14 +892,90 @@ async def query_session(session_id: str, query: QueryRequest):
             q_vec = embed_with_sbert([question])
             if q_vec is not None:
                 used_fallback = True
-                embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+                embedding_model = "sentence-transformers/all-mpnet-base-v2"
                 logger.info("Using SBERT fallback for query embedding")
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate query embedding")
         
-        # Search FAISS index
+        # Hybrid search: Vector (FAISS) + Keyword (BM25)
         try:
-            top_chunks = faiss_manager.search(session_id, q_vec, k=query.k)
+            # Vector search with FAISS
+            vector_chunks = faiss_manager.search(session_id, q_vec, k=query.k * 2)  # Get more for hybrid
+            
+            # Get all chunks from index for BM25
+            index_result = faiss_manager.load_index(session_id)
+            bm25_scores_dict = {}
+            bm25_chunks = []
+            
+            if index_result:
+                _, all_metadata = index_result
+                question_tokens = question.lower().split()
+                
+                if all_metadata and question_tokens:
+                    # Prepare corpus for BM25
+                    corpus = []
+                    for meta in all_metadata:
+                        text = meta.get("text", "")
+                        tokens = text.lower().split()
+                        corpus.append(tokens)
+                    
+                    if corpus:
+                        # Perform BM25 keyword search
+                        bm25 = BM25Okapi(corpus)
+                        bm25_scores = bm25.get_scores(question_tokens)
+                        
+                        # Create BM25 scores dictionary
+                        bm25_scores_dict = {all_metadata[i].get("text", ""): bm25_scores[i] for i in range(len(all_metadata))}
+                        
+                        # Score all chunks with BM25 and get top k
+                        bm25_scored = [(all_metadata[i], bm25_scores[i]) for i in range(len(all_metadata))]
+                        bm25_scored.sort(key=lambda x: x[1], reverse=True)
+                        bm25_chunks = [chunk for chunk, score in bm25_scored[:query.k]]
+            
+            # Combine vector and BM25 results
+            vector_scores = {chunk.get("text", ""): chunk.get("score", 0) for chunk in vector_chunks}
+            
+            # Normalize scores to 0-1 range for combination
+            if vector_chunks:
+                max_vec_score = max([c.get("score", 0) for c in vector_chunks]) or 1
+                if max_vec_score > 0:
+                    vector_scores = {k: v / max_vec_score for k, v in vector_scores.items()}
+            
+            if bm25_scores_dict:
+                max_bm25_score = max(bm25_scores_dict.values()) or 1
+                if max_bm25_score > 0:
+                    bm25_scores_dict = {k: v / max_bm25_score for k, v in bm25_scores_dict.items()}
+            
+            # Combine scores (weighted: 70% vector, 30% BM25)
+            combined_scores = {}
+            all_chunks_dict = {}
+            
+            # Add vector chunks
+            for chunk in vector_chunks:
+                text = chunk.get("text", "")
+                all_chunks_dict[text] = chunk
+                combined_scores[text] = vector_scores.get(text, 0) * 0.7
+            
+            # Add BM25 scores to combined scores
+            for text, bm25_score in bm25_scores_dict.items():
+                if text in all_chunks_dict:
+                    combined_scores[text] = combined_scores.get(text, 0) + (bm25_score * 0.3)
+                elif bm25_chunks:
+                    # Find chunk by text
+                    for chunk in bm25_chunks:
+                        if chunk.get("text", "") == text:
+                            all_chunks_dict[text] = chunk
+                            combined_scores[text] = (bm25_score * 0.3)
+                            break
+            
+            # Sort by combined score and take top k
+            sorted_chunks = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+            top_chunks = [all_chunks_dict[text] for text, score in sorted_chunks[:query.k] if text in all_chunks_dict]
+            
+            # If hybrid search didn't produce results, fallback to vector only
+            if not top_chunks and vector_chunks:
+                top_chunks = vector_chunks[:query.k]
+                
         except ValueError as e:
             # Dimension mismatch - provide helpful error message
             if "Dimension mismatch" in str(e):
@@ -876,14 +1023,19 @@ async def query_session(session_id: str, query: QueryRequest):
                 if answer:
                     llm_model = OPENAI_GEN_MODEL
             
-            # Fallback to Groq (fast, free LLM)
+            # Fallback to Groq, then Ollama, then heuristic
             if answer is None:
-                answer = generate_with_local_llm(question, top_chunks)
+                answer, fallback_provider = generate_with_local_llm(question, top_chunks)
                 if answer:
                     used_fallback = True
-                    llm_used = "groq-fallback"
-                    llm_model = GROQ_GEN_MODEL
-                    logger.info("Using Groq fallback for generation")
+                    if fallback_provider == "groq":
+                        llm_used = "groq-fallback"
+                        llm_model = GROQ_GEN_MODEL
+                        logger.info("Using Groq fallback for generation")
+                    elif fallback_provider == "ollama":
+                        llm_used = "ollama-fallback"
+                        llm_model = "ollama-llama3"
+                        logger.info("Using Ollama fallback for generation")
             
             # Final fallback to heuristic
             if answer is None:
