@@ -1,10 +1,14 @@
 # Frontend
 
-Angular single-page app using Angular Material. No routing; all interactions on one page.
+Angular single-page application using Angular Material.
 
-Scripts:
-- npm start
-- npm run build
-- npm test
+## Scripts
 
-Ensure backend is running on http://localhost:8000.
+- `npm start` - Start development server
+- `npm run build` - Build for production
+- `npm test` - Run tests
+
+## Requirements
+
+- Backend must be running on http://localhost:8000
+- Node.js 18+

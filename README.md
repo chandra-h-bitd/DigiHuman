@@ -112,40 +112,7 @@ curl -X POST http://localhost:8000/config \
 
 ## 🏢 Corporate Network Setup
 
-For company laptops with network restrictions:
-
-**NPM SSL Certificate Issue:**
-```bash
-npm config set strict-ssl false
-cd frontend
-npm install
-```
-
-**Automated Fix:**
-```bash
-# Run the setup script
-setup\company_laptop_setup.bat
-```
-
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and [setup/](setup/) folder for detailed guides.
-
-## 🔧 Troubleshooting
-
-**Backend won't start:**
-- Check Python version: `python --version` (need 3.9+)
-- Check port 8000: `netstat -ano | findstr ":8000"`
-- Install dependencies: `pip install -r requirements.txt`
-
-**Frontend won't start:**
-- Check Node version: `node --version` (need 18+)
-- Check port 4200: `netstat -ano | findstr ":4200"`
-- Clear cache: `npm cache clean --force`
-
-**Dimension mismatch error:**
-- Documents uploaded with one embedding model, queried with another
-- Solution: Re-upload documents with current API key settings
-
-**For more issues, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
+For company laptops with network restrictions, the one-click installer handles SSL issues automatically. For manual fixes, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## 📁 Project Structure
 
@@ -169,7 +136,6 @@ FINQUEST-AI/
 │   ├── company_laptop_setup.bat
 │   ├── diagnose_npm.ps1
 │   └── FIX_SSL_CERTIFICATE.md
-├── docs/                    # Platform-specific setup guides
 ├── TROUBLESHOOTING.md       # Common issues and solutions
 └── README.md                # This file
 ```
@@ -253,9 +219,9 @@ MIT License - See LICENSE file for details
 
 ## 📞 Support
 
-- **Issues**: Open a GitHub issue
-- **Corporate Network**: See `setup/` folder
+- **Quick Start**: See [QUICK_START.md](QUICK_START.md)
 - **Troubleshooting**: See [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+- **Issues**: Open a GitHub issue
 
 ---
 

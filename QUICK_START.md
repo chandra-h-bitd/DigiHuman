@@ -146,23 +146,7 @@ The database stores API keys in:
 
 ## 🏢 Corporate Network Setup
 
-If you're on a company laptop and `npm install` fails:
-
-```bash
-# Fix SSL certificate issues
-npm config set strict-ssl false
-
-# Then install
-cd frontend
-npm install
-```
-
-**Or use the automated script:**
-```bash
-setup\company_laptop_setup.bat
-```
-
-For more details, see [setup/FIX_SSL_CERTIFICATE.md](setup/FIX_SSL_CERTIFICATE.md)
+If you're on a company laptop and `npm install` fails, the one-click installer handles this automatically. For manual fixes, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## ✅ Verification
 
@@ -185,40 +169,7 @@ You should see the FINQUEST AI interface.
 
 ## 🔧 Common Issues
 
-### Backend Issues
-
-**Port 8000 already in use:**
-```bash
-# Windows
-netstat -ano | findstr ":8000"
-taskkill /PID <PID_NUMBER> /F
-
-# Linux/Mac
-lsof -ti:8000 | xargs kill
-```
-
-**Python version too old:**
-```bash
-python --version  # Should be 3.9 or higher
-```
-
-Upgrade Python if needed: https://www.python.org/downloads/
-
-### Frontend Issues
-
-**Port 4200 already in use:**
-```bash
-# Windows
-netstat -ano | findstr ":4200"
-taskkill /PID <PID_NUMBER> /F
-
-# Linux/Mac
-lsof -ti:4200 | xargs kill
-```
-
-**npm install hangs:**
-- See [setup/FIX_SSL_CERTIFICATE.md](setup/FIX_SSL_CERTIFICATE.md)
-- Or run `setup\diagnose_npm.ps1` for diagnostics
+For detailed troubleshooting, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## 📋 Quick Reference
 
@@ -261,16 +212,4 @@ npm start
 
 - **Full Documentation**: [README.md](README.md)
 - **Troubleshooting**: [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- **Corporate Setup**: [setup/](setup/) folder
 - **API Documentation**: http://localhost:8000/docs
-
-## 💡 Pro Tips
-
-- **Groq Fallback**: Set up Groq API key for free, fast, intelligent fallback
-- **Session Organization**: Create separate sessions for different topics
-- **Document Names**: Use descriptive filenames for better source citations
-- **API Keys**: At minimum, set up Groq (it's free!) for functional fallback
-
----
-
-**Need help?** Check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) or open an issue on GitHub.

@@ -42,7 +42,7 @@ See [Corporate Network Setup](#corporate-network-npm-issues)
 
 ## 📡 Corporate Network / NPM Issues
 
-### SSL Certificate Error (npm install)
+### SSL Certificate Error
 
 **Error:** `unable to get issuer certificate locally`
 
@@ -51,70 +51,29 @@ See [Corporate Network Setup](#corporate-network-npm-issues)
 # Disable SSL verification
 npm config set strict-ssl false
 
-# Test
+# Test connection
 npm ping
 
-# Install
+# Install dependencies
 cd frontend
 npm install
 ```
-
-### SSL Certificate Error (npm start / Font Inlining)
-
-**Error:** `Inlining of fonts failed` or **Icons not showing**
-
-**Solution:**
-```bash
-cd frontend
-
-# Install material-icons package (already in package.json)
-npm install
-
-# Clear Angular cache if icons still don't show
-Remove-Item -Recurse -Force .angular -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
-
-# Start again
-npm start
-```
-
-**Icons are now loaded from node_modules** - no Google CDN needed!
 
 ### Proxy Configuration
 
-**If npm ping fails:**
+If npm ping fails, configure proxy:
 
-1. **Get proxy settings:**
-```powershell
-Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-```
-
-2. **Configure npm:**
 ```bash
+# Get proxy settings (Windows PowerShell)
+Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+
+# Configure npm
 npm config set proxy http://PROXY:PORT
 npm config set https-proxy http://PROXY:PORT
-```
+npm config set strict-ssl false
 
-3. **Test:**
-```bash
+# Test
 npm ping
-```
-
-### Offline Installation (No Network Access)
-
-**On personal laptop (with internet):**
-```bash
-cd frontend
-npm install
-tar -czf node_modules.tar.gz node_modules
-# Or zip with 7-Zip
-```
-
-**On company laptop:**
-```bash
-cd frontend
-# Extract node_modules.tar.gz or .zip here
-# Skip npm install - done!
 ```
 
 ### Automated Fix
@@ -122,7 +81,6 @@ cd frontend
 Use the setup scripts in `setup/` folder:
 - `company_laptop_setup.bat` - Auto-configures npm for corporate networks
 - `diagnose_npm.ps1` - Diagnoses network issues
-- `FIX_SSL_CERTIFICATE.md` - Detailed SSL fix guide
 
 ## 🔄 Fallback & API Key Issues
 
@@ -282,6 +240,5 @@ curl http://localhost:8000/config
 
 ---
 
-**For detailed setup instructions, see [QUICK_START.md](QUICK_START.md)**  
-**For corporate network setup, see [setup/](setup/) folder**
+**For setup instructions, see [QUICK_START.md](QUICK_START.md)**
 
