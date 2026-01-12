@@ -20,14 +20,14 @@
   },
   "gemini": {
     "embedding_model": "text-embedding-004",
-    "generation_model": "gemini-2.0-flash-exp",
+    "generation_model": "gemini-3-flash-preview",
     "available_models": {
       "embedding": [
         "text-embedding-004",
         "embedding-001"
       ],
       "generation": [
-        "gemini-2.0-flash-exp",
+        "gemini-3-flash-preview",
         "gemini-1.5-flash",
         "gemini-1.5-pro"
       ]
