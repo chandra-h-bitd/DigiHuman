@@ -67,3 +67,8 @@ Thumbs.db
 *_old.*
 *_backup.*
 QUICK_START_OLD.md
+
+# Test files (may contain secrets)
+test_chatgpt_flow.py
+test_chatgpt_comprehensive.py
+test_ui_settings_flow.md
