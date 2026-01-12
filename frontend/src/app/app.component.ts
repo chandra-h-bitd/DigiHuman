@@ -256,7 +256,7 @@ export class AppComponent implements OnInit {
       return;
     }
 
-    const allowedTypes = ['.pdf', '.docx', '.txt', '.md', '.markdown'];
+    const allowedTypes = ['.pdf', '.docx', '.txt', '.md', '.markdown', '.html', '.htm'];
     const ext = '.' + file.name.split('.').pop()?.toLowerCase();
     if (!allowedTypes.includes(ext)) {
       this.snack.open(`Only ${allowedTypes.join(', ')} files are supported`, 'Dismiss', { duration: 3000 });

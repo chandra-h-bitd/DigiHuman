@@ -62,24 +62,35 @@ import requests
 requests.packages.urllib3.disable_warnings()
 
 # Download NLTK data with SSL fix
+_nltk_available = False
 try:
     nltk.data.find('tokenizers/punkt')
+    _nltk_available = True
+    logger.info("NLTK punkt tokenizer found")
 except LookupError:
     try:
+        logger.info("Downloading NLTK punkt tokenizer...")
+        # Try downloading with SSL disabled (already configured above)
         nltk.download('punkt', quiet=True)
+        # Verify it was downloaded
+        nltk.data.find('tokenizers/punkt')
+        _nltk_available = True
         logger.info("NLTK punkt tokenizer downloaded successfully")
     except Exception as e:
         logger.warning(f"Failed to download NLTK punkt: {e}")
-        logger.warning("NLTK punkt will be downloaded on first use (may cause delays)")
+        logger.warning("Will use fallback sentence splitting (period-based)")
+        logger.warning("This is safe - chunking will still work, just with simpler sentence detection")
 
 try:
     nltk.data.find('tokenizers/punkt_tab')
+    logger.info("NLTK punkt_tab tokenizer found")
 except LookupError:
     try:
+        logger.info("Downloading NLTK punkt_tab tokenizer (optional)...")
         nltk.download('punkt_tab', quiet=True)
         logger.info("NLTK punkt_tab tokenizer downloaded successfully")
     except Exception as e:
-        logger.warning(f"Failed to download NLTK punkt_tab: {e}")
+        logger.warning(f"Failed to download NLTK punkt_tab (optional): {e}")
         # punkt_tab is optional, so we can continue without it
 
 # FastAPI app
@@ -259,7 +270,17 @@ def smart_chunk(text: str, doc_name: str, chunk_size: int = 700) -> List[Dict[st
             continue
         
         # Sentence split for large paragraphs
-        sents = sent_tokenize(p)
+        try:
+            if _nltk_available:
+                sents = sent_tokenize(p)
+            else:
+                # Fallback: simple sentence splitting by periods
+                sents = [s.strip() + '.' for s in p.split('.') if s.strip()]
+        except (LookupError, Exception) as e:
+            logger.warning(f"NLTK sentence tokenization failed, using fallback: {e}")
+            # Fallback: simple sentence splitting by periods
+            sents = [s.strip() + '.' for s in p.split('.') if s.strip()]
+        
         current = []
         current_tokens = 0
         
@@ -328,6 +349,18 @@ def parse_markdown(file_bytes: bytes) -> str:
     html = markdown.markdown(md_text)
     # Simple HTML tag removal
     text = re.sub(r'<[^>]+>', ' ', html)
+    return text
+
+def parse_html(file_bytes: bytes) -> str:
+    """Parse HTML file into plain text"""
+    html_text = file_bytes.decode('utf-8', errors='ignore')
+    # Remove script/style content
+    html_text = re.sub(r'<script[^>]*>.*?</script>', ' ', html_text, flags=re.DOTALL | re.IGNORECASE)
+    html_text = re.sub(r'<style[^>]*>.*?</style>', ' ', html_text, flags=re.DOTALL | re.IGNORECASE)
+    # Strip tags
+    text = re.sub(r'<[^>]+>', ' ', html_text)
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 # ========== LLM Provider Functions ==========
@@ -632,7 +665,17 @@ def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
     # Extract relevant sentences from top chunks
     sentences = []
     for idx, (chunk, score, text) in enumerate(top_chunks):
-        sents = sent_tokenize(text)
+        try:
+            if _nltk_available:
+                sents = sent_tokenize(text)
+            else:
+                # Fallback: simple sentence splitting by periods
+                sents = [s.strip() + '.' for s in text.split('.') if s.strip()]
+        except (LookupError, Exception) as e:
+            logger.warning(f"NLTK sentence tokenization failed in heuristic, using fallback: {e}")
+            # Fallback: simple sentence splitting by periods
+            sents = [s.strip() + '.' for s in text.split('.') if s.strip()]
+        
         # Prioritize sentences that contain question keywords
         question_words = set(question.lower().split())
         for s in sents:
@@ -802,6 +845,8 @@ async def upload_document(
             text = parse_txt(content)
         elif ext in [".md", ".markdown"]:
             text = parse_markdown(content)
+        elif ext in [".html", ".htm"]:
+            text = parse_html(content)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
         
