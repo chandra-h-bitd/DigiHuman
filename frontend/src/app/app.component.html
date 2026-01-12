@@ -206,7 +206,7 @@
                   </div>
                   <div class="message-text" [innerHTML]="renderMarkdown(msg.text)"></div>
                   
-                  <!-- Sources -->
+                  <!-- Sources (shown only if backend sends them) -->
                   <div *ngIf="msg.sources && msg.sources.length > 0" class="message-sources">
                     <details>
                       <summary>{{ msg.sources.length }} source(s)</summary>

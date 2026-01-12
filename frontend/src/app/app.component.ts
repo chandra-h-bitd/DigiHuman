@@ -76,6 +76,8 @@ export class AppComponent implements OnInit {
   question = '';
   answering = false;
   
+  // App config (loaded from localStorage)
+  
   // Sample questions (suggestions)
   sampleQuestions = [
     "What is this document about?",

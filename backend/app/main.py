@@ -126,6 +126,16 @@ OPENAI_GEN_MODEL = CONFIG["openai"]["generation_model"]
 GROQ_GEN_MODEL = CONFIG["groq"]["generation_model"]
 GROQ_API_URL = CONFIG["groq"]["api_url"]
 
+# Generation parameters from config
+GENERATION_TEMPERATURE = CONFIG["generation"]["temperature"]
+GENERATION_MAX_TOKENS = CONFIG["generation"]["max_output_tokens"]
+SHOW_SOURCES = CONFIG["generation"].get("show_sources", False)
+
+# Retrieval parameters from config
+DEFAULT_K = CONFIG["retrieval"]["default_k"]
+MAX_K = CONFIG["retrieval"]["max_k"]
+SIMILARITY_THRESHOLD = CONFIG["retrieval"]["similarity_threshold"]
+
 # Lazy-loaded models
 _sbert_model = None
 _local_llm = None
@@ -214,7 +224,7 @@ class UploadResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    k: int = 5
+    k: int = DEFAULT_K  # Use config default, max MAX_K
 
 class QueryResponse(BaseModel):
     conversation_id: str
@@ -460,8 +470,8 @@ def generate_with_gemini(prompt: str, api_key: str, model_name: str = None) -> O
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 512,
+            "temperature": GENERATION_TEMPERATURE,
+            "maxOutputTokens": GENERATION_MAX_TOKENS,
         }
     }
     
@@ -495,8 +505,8 @@ def generate_with_chatgpt(prompt: str, api_key: str, model_name: str = "gpt-4o-m
     payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": 512
+        "temperature": GENERATION_TEMPERATURE,
+        "max_tokens": GENERATION_MAX_TOKENS
     }
     
     try:
@@ -542,8 +552,8 @@ def generate_with_groq(prompt: str, api_key: Optional[str] = None) -> Optional[s
             "messages": [
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.2,
-            "max_tokens": 512
+            "temperature": GENERATION_TEMPERATURE,
+            "max_tokens": GENERATION_MAX_TOKENS
         }
         
         response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=10, verify=False)
@@ -574,8 +584,8 @@ def generate_with_ollama(prompt: str, model: str = "llama3") -> Optional[str]:
     try:
         logger.info(f"Trying Ollama with model: {model}")
         response = ollama.generate(model=model, prompt=prompt, options={
-            "temperature": 0.2,
-            "num_predict": 512
+            "temperature": GENERATION_TEMPERATURE,
+            "num_predict": GENERATION_MAX_TOKENS
         })
         answer = response.get("response", "").strip()
         if answer:
@@ -592,17 +602,21 @@ def generate_with_local_llm(question: str, chunks: List[Dict[str, Any]]) -> Tupl
     # Build context from chunks
     context_parts = []
     for i, c in enumerate(chunks[:3]):
-        context_parts.append(f"[Source {i+1}] {c.get('text', '').strip()}")
+        if SHOW_SOURCES:
+            context_parts.append(f"[Source {i+1}] {c.get('text', '').strip()}")
+        else:
+            context_parts.append(c.get('text', '').strip())
     context = "\n\n".join(context_parts)
     
-    prompt = f"""Based on the following context, answer the question concisely and cite sources.
+    source_instruction = " and cite sources as [Source N]" if SHOW_SOURCES else ""
+    prompt = f"""Based on the following context, answer the question concisely{source_instruction}.
 
 Context:
 {context}
 
 Question: {question}
 
-Answer (cite sources as [Source N]):"""
+Answer{source_instruction}:"""
     
     # Try Groq first (very fast, high quality)
     logger.info("Trying Groq API fallback...")
@@ -683,7 +697,10 @@ def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
                 sent_words = set(s.lower().split())
                 # Check if sentence contains question keywords
                 if question_words.intersection(sent_words) or idx == 0:
-                    sentences.append(f"{s} [Source {idx+1}]")
+                    if SHOW_SOURCES:
+                        sentences.append(f"{s} [Source {idx+1}]")
+                    else:
+                        sentences.append(s)
                     if len(sentences) >= 5:
                         break
     
@@ -947,6 +964,9 @@ async def list_documents(session_id: str):
 async def query_session(session_id: str, query: QueryRequest):
     """Query a session's documents"""
     try:
+        # Validate and clamp k value (ensure it's between 1 and MAX_K)
+        query.k = min(max(1, query.k), MAX_K)
+        
         # Verify session exists
         session = db.get_session(session_id)
         if not session:
@@ -1092,14 +1112,24 @@ async def query_session(session_id: str, query: QueryRequest):
             # We have chunks - try to answer even if similarity is low
             # This ensures fallback LLM still works with available context
             # Build prompt
-            context = "\n\n".join(
-                f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" 
-                for i, c in enumerate(top_chunks)
-            )
-            system_prompt = (
-                "You are a helpful assistant answering questions based only on the provided context. "
-                "Cite sources as [Source N]. If the answer is not in the context, say so.\n\n"
-            )
+            if SHOW_SOURCES:
+                context = "\n\n".join(
+                    f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" 
+                    for i, c in enumerate(top_chunks)
+                )
+                system_prompt = (
+                    "You are a helpful assistant answering questions based only on the provided context. "
+                    "Cite sources as [Source N]. If the answer is not in the context, say so.\n\n"
+                )
+            else:
+                context = "\n\n".join(
+                    f"{c['text']}" 
+                    for c in top_chunks
+                )
+                system_prompt = (
+                    "You are a helpful assistant answering questions based only on the provided context. "
+                    "If the answer is not in the context, say so.\n\n"
+                )
             prompt = f"{system_prompt}Context:\n{context}\n\nQuestion: {question}\nAnswer:"
             
             # Try primary LLM
@@ -1140,7 +1170,13 @@ async def query_session(session_id: str, query: QueryRequest):
                 llm_model = "rule-based-extraction"
                 logger.info("Using heuristic fallback for generation")
             
-            sources = top_chunks
+            # Remove [Source N] tags from answer if sources are hidden
+            if not SHOW_SOURCES and answer:
+                answer = re.sub(r'\s*\[Source \d+\]\s*', ' ', answer)
+                answer = re.sub(r'\s{2,}', ' ', answer).strip()
+            
+            # Return empty sources array if sources are hidden
+            sources = top_chunks if SHOW_SOURCES else []
         
         # Save conversation to database
         conversation = db.add_conversation(

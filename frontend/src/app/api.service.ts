@@ -105,10 +105,9 @@ export class ApiService {
 
   // ========== Query / Conversation ==========
 
-  query(sessionId: string, question: string, k: number = 5): Observable<QueryResponse> {
+  query(sessionId: string, question: string): Observable<QueryResponse> {
     return this.http.post<QueryResponse>(`${this.baseUrl}/sessions/${sessionId}/query`, {
-      question: question,
-      k: k
+      question: question
     });
   }
 

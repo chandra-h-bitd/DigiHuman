@@ -16,7 +16,8 @@
   },
   "generation": {
     "temperature": 0.2,
-    "max_output_tokens": 512
+    "max_output_tokens": 2048,
+    "show_sources": false
   },
   "gemini": {
     "embedding_model": "text-embedding-004",
