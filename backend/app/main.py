@@ -211,6 +211,9 @@ class QueryResponse(BaseModel):
     sources: List[Dict[str, Any]]
     llm_used: str
     used_fallback: bool
+    embedding_fallback: bool  # Whether embedding step used a fallback provider
+    generation_fallback: bool  # Whether generation step used a fallback provider
+    embed_provider: str  # Provider used for embeddings
     embedding_model: str  # Specific model used for query embedding
     llm_model: str  # Specific model used for answer generation
 
@@ -915,21 +918,27 @@ async def query_session(session_id: str, query: QueryRequest):
         q_vec = None
         used_fallback = False
         embedding_model = ""
+        embedding_fallback = False
+        embed_provider = primary_llm
         
         if primary_llm == "gemini" and gemini_key:
             q_vec = embed_with_gemini([question], gemini_key, GEMINI_EMBED_MODEL)
             if q_vec is not None:
                 embedding_model = GEMINI_EMBED_MODEL
+                embed_provider = "gemini"
         elif primary_llm == "chatgpt" and chatgpt_key:
             q_vec = embed_with_chatgpt([question], chatgpt_key, OPENAI_EMBED_MODEL)
             if q_vec is not None:
                 embedding_model = OPENAI_EMBED_MODEL
+                embed_provider = "chatgpt"
         
         if q_vec is None:
             q_vec = embed_with_sbert([question])
             if q_vec is not None:
                 used_fallback = True
+                embedding_fallback = True
                 embedding_model = "sentence-transformers/all-mpnet-base-v2"
+                embed_provider = "sbert"
                 logger.info("Using SBERT fallback for query embedding")
             else:
                 raise HTTPException(status_code=500, detail="Failed to generate query embedding")
@@ -1027,6 +1036,7 @@ async def query_session(session_id: str, query: QueryRequest):
         
         # Check if we have any chunks at all
         llm_model = ""
+        generation_fallback = False
         if not top_chunks:
             # No chunks found at all - truly out of context
             answer = "I'm sorry, but I couldn't find relevant information in the documents to answer your question. The query appears to be out of context."
@@ -1050,6 +1060,7 @@ async def query_session(session_id: str, query: QueryRequest):
             # Try primary LLM
             answer = None
             llm_used = primary_llm
+            generation_fallback = False
             
             if primary_llm == "gemini" and gemini_key:
                 answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
@@ -1065,6 +1076,7 @@ async def query_session(session_id: str, query: QueryRequest):
                 answer, fallback_provider = generate_with_local_llm(question, top_chunks)
                 if answer:
                     used_fallback = True
+                    generation_fallback = True
                     if fallback_provider == "groq":
                         llm_used = "groq-fallback"
                         llm_model = GROQ_GEN_MODEL
@@ -1078,6 +1090,7 @@ async def query_session(session_id: str, query: QueryRequest):
             if answer is None:
                 answer = heuristic_answer(question, top_chunks)
                 used_fallback = True
+                generation_fallback = True
                 llm_used = "heuristic"
                 llm_model = "rule-based-extraction"
                 logger.info("Using heuristic fallback for generation")
@@ -1095,6 +1108,9 @@ async def query_session(session_id: str, query: QueryRequest):
             sources=sources,
             llm_used=llm_used,
             used_fallback=used_fallback,
+            embedding_fallback=embedding_fallback,
+            generation_fallback=generation_fallback,
+            embed_provider=embed_provider,
             embedding_model=embedding_model,
             llm_model=llm_model
         )

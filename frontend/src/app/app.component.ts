@@ -28,6 +28,12 @@ interface ChatMessage {
   text: string;
   sources?: any[];
   llm_used?: string;
+  llm_model?: string;
+  embed_provider?: string;
+  embedding_model?: string;
+  embedding_fallback?: boolean;
+  generation_fallback?: boolean;
+  used_fallback?: boolean;
   created_at?: string;
 }
 
@@ -56,7 +62,7 @@ export class AppComponent implements OnInit {
   
   // New session creation
   newSessionName = '';
-  newSessionLLM: 'gemini' | 'chatgpt' = 'gemini';
+  newSessionLLM: 'gemini' | 'chatgpt' = 'chatgpt';
   creatingSession = false;
   
   // Document upload
@@ -85,6 +91,19 @@ export class AppComponent implements OnInit {
     this.question = question;
     // Optionally auto-submit
     // this.ask();
+  }
+
+  buildLLMLabel(data: any): string {
+    const llm = data?.llm_used || 'assistant';
+    const model = data?.llm_model ? ` (${data.llm_model})` : '';
+    return `${llm}${model}`;
+  }
+
+  buildFallbackLabel(data: any): string {
+    const parts: string[] = [];
+    if (data?.embedding_fallback) parts.push(`embed: ${data.embed_provider || 'fallback'}`);
+    if (data?.generation_fallback) parts.push(`gen: ${data.llm_used}`);
+    return parts.join(' | ');
   }
   
   // Settings
@@ -320,13 +339,19 @@ export class AppComponent implements OnInit {
           text: data.answer,
           sources: data.sources,
           llm_used: data.llm_used,
+          llm_model: data.llm_model,
+          embed_provider: data.embed_provider,
+          embedding_model: data.embedding_model,
+          embedding_fallback: data.embedding_fallback,
+          generation_fallback: data.generation_fallback,
+          used_fallback: data.used_fallback,
           created_at: new Date().toISOString()
         });
         this.question = '';
         this.answering = false;
-        if (data.used_fallback) {
-          this.snack.open(`Answer from ${data.llm_used} (fallback)`, 'Info', { duration: 2500 });
-        }
+        const fallbackLabel = this.buildFallbackLabel(data);
+        const llmLabel = this.buildLLMLabel(data);
+        this.snack.open(`${llmLabel}${fallbackLabel ? ' • ' + fallbackLabel : ''}`, 'OK', { duration: 3000 });
       },
       error: (err) => {
         console.error('Query failed:', err);
@@ -468,6 +493,8 @@ export class AppComponent implements OnInit {
     switch (llm) {
       case 'gemini': return 'auto_awesome';
       case 'chatgpt': return 'psychology';
+      case 'groq-fallback': return 'flash_on';
+      case 'ollama-fallback': return 'memory';
       case 'local-llm': return 'computer';
       case 'heuristic': return 'search';
       case 'out-of-context': return 'warning';
@@ -479,6 +506,8 @@ export class AppComponent implements OnInit {
     switch (llm) {
       case 'gemini': return '#4285f4';
       case 'chatgpt': return '#10a37f';
+      case 'groq-fallback': return '#9c27b0';
+      case 'ollama-fallback': return '#795548';
       case 'local-llm': return '#ff9800';
       case 'heuristic': return '#9e9e9e';
       case 'out-of-context': return '#f44336';

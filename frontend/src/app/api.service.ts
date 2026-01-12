@@ -46,6 +46,11 @@ export interface QueryResponse {
   answer: string;
   sources: any[];
   llm_used: string;
+  llm_model: string;
+  embed_provider: string;
+  embedding_model: string;
+  embedding_fallback: boolean;
+  generation_fallback: boolean;
   used_fallback: boolean;
 }
 
@@ -59,7 +64,7 @@ export class ApiService {
 
   // ========== Session Management ==========
 
-  createSession(sessionName: string, primaryLlm: string = 'gemini'): Observable<Session> {
+  createSession(sessionName: string, primaryLlm: string = 'chatgpt'): Observable<Session> {
     return this.http.post<Session>(`${this.baseUrl}/sessions`, {
       session_name: sessionName,
       primary_llm: primaryLlm
@@ -102,7 +107,6 @@ export class ApiService {
 
   query(sessionId: string, question: string, k: number = 5): Observable<QueryResponse> {
     return this.http.post<QueryResponse>(`${this.baseUrl}/sessions/${sessionId}/query`, {
-      session_id: sessionId,
       question: question,
       k: k
     });

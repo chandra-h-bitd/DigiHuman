@@ -195,7 +195,13 @@
                     <span class="message-time">{{ formatTime(msg.created_at) }}</span>
                     <mat-chip *ngIf="msg.llm_used" class="llm-badge" 
                              [style.background-color]="getLLMColor(msg.llm_used)">
-                      {{ msg.llm_used }}
+                      {{ msg.llm_used }}<span *ngIf="msg.llm_model"> • {{ msg.llm_model }}</span>
+                    </mat-chip>
+                    <mat-chip *ngIf="msg.embedding_fallback" class="llm-badge fallback-chip" color="warn">
+                      embed: {{ msg.embed_provider || 'fallback' }}
+                    </mat-chip>
+                    <mat-chip *ngIf="msg.generation_fallback" class="llm-badge fallback-chip" color="warn">
+                      gen fallback
                     </mat-chip>
                   </div>
                   <div class="message-text" [innerHTML]="renderMarkdown(msg.text)"></div>
