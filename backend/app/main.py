@@ -24,7 +24,6 @@ import nltk
 from nltk.tokenize import sent_tokenize
 
 import numpy as np
-import requests
 from rank_bm25 import BM25Okapi
 
 # Import our custom modules
@@ -35,16 +34,32 @@ from .storage import get_faiss_manager, FAISSManager
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# Ensure NLTK data
-# Fix SSL certificate issues for NLTK downloads (corporate networks)
+# Fix SSL certificate issues for corporate networks
+# This applies to: NLTK downloads, Gemini API, Hugging Face, and all HTTPS requests
 import ssl
+import urllib3
+import os
+
+# Disable SSL warnings (we know we're disabling verification for corporate networks)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Disable SSL verification globally (safe for corporate networks)
 try:
     _create_unverified_https_context = ssl._create_unverified_context
 except AttributeError:
     pass
 else:
     ssl._create_default_https_context = _create_unverified_https_context
-    logger.info("SSL verification disabled for NLTK downloads (corporate network fix)")
+    logger.info("SSL verification disabled for all HTTPS requests (corporate network fix)")
+
+# Set environment variables for Hugging Face to disable SSL verification
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_SSL'] = '1'  # Disable SSL for Hugging Face Hub
+
+# Configure requests library to not verify SSL
+import requests
+requests.packages.urllib3.disable_warnings()
 
 # Download NLTK data with SSL fix
 try:
@@ -187,7 +202,6 @@ class UploadResponse(BaseModel):
     embedding_model: str  # Specific model name used for embeddings
 
 class QueryRequest(BaseModel):
-    session_id: str
     question: str
     k: int = 5
 
@@ -334,7 +348,7 @@ def embed_with_gemini(texts: List[str], api_key: str, model_name: str = "text-em
                 "model": mp,
                 "content": {"parts": [{"text": t}]}
             }
-            r = requests.post(url, json=payload, timeout=30)
+            r = requests.post(url, json=payload, timeout=30, verify=False)
             if not r.ok:
                 logger.warning(f"Gemini embed error: {r.status_code} {r.text[:200]}")
                 return None
@@ -366,7 +380,7 @@ def embed_with_chatgpt(texts: List[str], api_key: str, model_name: str = "text-e
                 "model": model_name,
                 "input": text
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            r = requests.post(url, json=payload, headers=headers, timeout=30, verify=False)
             if not r.ok:
                 logger.warning(f"OpenAI embed error: {r.status_code} {r.text[:200]}")
                 return None
@@ -393,10 +407,14 @@ def embed_with_sbert(texts: List[str]) -> Optional[np.ndarray]:
         logger.error(f"SBERT embedding failed: {e}")
         return None
 
-def generate_with_gemini(prompt: str, api_key: str, model_name: str = "gemini-2.0-flash-exp") -> Optional[str]:
+def generate_with_gemini(prompt: str, api_key: str, model_name: str = None) -> Optional[str]:
     """Generate text using Gemini API"""
     if not api_key:
         return None
+    
+    # Use config default if not provided
+    if model_name is None:
+        model_name = GEMINI_GEN_MODEL
     
     mp = _model_path(model_name)
     url = f"https://generativelanguage.googleapis.com/v1beta/{mp}:generateContent?key={api_key}"
@@ -412,7 +430,7 @@ def generate_with_gemini(prompt: str, api_key: str, model_name: str = "gemini-2.
     }
     
     try:
-        r = requests.post(url, json=payload, timeout=60)
+        r = requests.post(url, json=payload, timeout=60, verify=False)
         if not r.ok:
             logger.warning(f"Gemini generate error: {r.status_code} {r.text[:200]}")
             return None
@@ -446,7 +464,7 @@ def generate_with_chatgpt(prompt: str, api_key: str, model_name: str = "gpt-4o-m
     }
     
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        r = requests.post(url, json=payload, headers=headers, timeout=60, verify=False)
         if not r.ok:
             logger.warning(f"OpenAI generate error: {r.status_code} {r.text[:200]}")
             return None
@@ -492,7 +510,7 @@ def generate_with_groq(prompt: str, api_key: Optional[str] = None) -> Optional[s
             "max_tokens": 512
         }
         
-        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=10)
+        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=10, verify=False)
         
         logger.info(f"Groq API response status: {response.status_code}")
         
@@ -807,11 +825,11 @@ async def upload_document(
         
         # Try primary LLM first
         if primary_llm == "gemini" and gemini_key:
-            vecs = embed_with_gemini(texts, gemini_key)
+            vecs = embed_with_gemini(texts, gemini_key, GEMINI_EMBED_MODEL)
             if vecs is not None:
                 embedding_model = GEMINI_EMBED_MODEL
         elif primary_llm == "chatgpt" and chatgpt_key:
-            vecs = embed_with_chatgpt(texts, chatgpt_key)
+            vecs = embed_with_chatgpt(texts, chatgpt_key, OPENAI_EMBED_MODEL)
             if vecs is not None:
                 embedding_model = OPENAI_EMBED_MODEL
         
@@ -899,11 +917,11 @@ async def query_session(session_id: str, query: QueryRequest):
         embedding_model = ""
         
         if primary_llm == "gemini" and gemini_key:
-            q_vec = embed_with_gemini([question], gemini_key)
+            q_vec = embed_with_gemini([question], gemini_key, GEMINI_EMBED_MODEL)
             if q_vec is not None:
                 embedding_model = GEMINI_EMBED_MODEL
         elif primary_llm == "chatgpt" and chatgpt_key:
-            q_vec = embed_with_chatgpt([question], chatgpt_key)
+            q_vec = embed_with_chatgpt([question], chatgpt_key, OPENAI_EMBED_MODEL)
             if q_vec is not None:
                 embedding_model = OPENAI_EMBED_MODEL
         
@@ -1034,11 +1052,11 @@ async def query_session(session_id: str, query: QueryRequest):
             llm_used = primary_llm
             
             if primary_llm == "gemini" and gemini_key:
-                answer = generate_with_gemini(prompt, gemini_key)
+                answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
                 if answer:
                     llm_model = GEMINI_GEN_MODEL
             elif primary_llm == "chatgpt" and chatgpt_key:
-                answer = generate_with_chatgpt(prompt, chatgpt_key)
+                answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
                 if answer:
                     llm_model = OPENAI_GEN_MODEL
             
