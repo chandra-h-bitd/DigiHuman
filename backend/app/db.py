@@ -26,6 +26,7 @@ class Database:
         self.documents = self.db.table("documents")
         self.conversations = self.db.table("conversations")
         self.user_config = self.db.table("user_config")
+        self.session_summaries = self.db.table("session_summaries")
         
     def close(self):
         """Close database connection"""
@@ -77,11 +78,17 @@ class Database:
         self.documents.remove(Document.session_id == session_id)
         # Delete conversations
         self.conversations.remove(Conversation.session_id == session_id)
+        # Delete summary
+        self.delete_session_summary(session_id)
+        # Delete Q&A
+        self.delete_session_qa(session_id)
+        # Delete curriculum
+        self.delete_session_curriculum(session_id)
     
     # ========== Document Management ==========
     
     def add_document(self, session_id: str, file_name: str, file_type: str, 
-                     file_path: str, chunk_count: int = 0) -> Dict[str, Any]:
+                     file_path: str, chunk_count: int = 0, summary: Optional[str] = None, doc_type: str = "summary") -> Dict[str, Any]:
         """Add a document to a session"""
         import uuid
         document = {
@@ -91,6 +98,8 @@ class Database:
             "file_type": file_type,
             "file_path": file_path,
             "chunk_count": chunk_count,
+            "summary": summary or "",
+            "doc_type": doc_type,
             "uploaded_at": datetime.now().isoformat()
         }
         self.documents.insert(document)
@@ -106,6 +115,165 @@ class Database:
         """Delete a document"""
         Document = Query()
         self.documents.remove(Document.document_id == document_id)
+    
+    def update_document_summary(self, document_id: str, summary: str):
+        """Update document summary"""
+        Document = Query()
+        self.documents.update(
+            {"summary": summary}, 
+            Document.document_id == document_id
+        )
+    
+    def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific document by ID"""
+        Document = Query()
+        result = self.documents.search(Document.document_id == document_id)
+        return result[0] if result else None
+    
+    def get_document_summary(self, document_id: str) -> Optional[str]:
+        """Get summary for a specific document"""
+        document = self.get_document(document_id)
+        return document.get("summary") if document else None
+    
+    def get_summaries_by_session(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get all documents with their summaries for a session"""
+        Document = Query()
+        documents = self.documents.search(Document.session_id == session_id)
+        return [{
+            "document_id": doc.get("document_id"),
+            "file_name": doc.get("file_name"),
+            "summary": doc.get("summary", ""),
+            "uploaded_at": doc.get("uploaded_at")
+        } for doc in documents]
+    
+    # ========== Session Summary Management ==========
+    
+    def set_session_summary(self, session_id: str, summary: str) -> Dict[str, Any]:
+        """Set or update the consolidated summary for a session"""
+        SessionSummary = Query()
+        existing = self.session_summaries.search(SessionSummary.session_id == session_id)
+        
+        summary_obj = {
+            "session_id": session_id,
+            "summary": summary,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        if existing:
+            # Update existing summary
+            self.session_summaries.update(summary_obj, SessionSummary.session_id == session_id)
+        else:
+            # Create new summary
+            self.session_summaries.insert(summary_obj)
+        
+        return summary_obj
+    
+    def get_session_summary(self, session_id: str) -> Optional[str]:
+        """Get the consolidated summary for a session"""
+        try:
+            SessionSummary = Query()
+            result = self.session_summaries.search(SessionSummary.session_id == session_id)
+            return result[0].get("summary") if result else None
+        except Exception as e:
+            # If table doesn't exist or other error, return None gracefully
+            import logging
+            logging.warning(f"Error getting session summary: {e}")
+            return None
+    
+    def delete_session_summary(self, session_id: str):
+        """Delete session summary"""
+        SessionSummary = Query()
+        self.session_summaries.remove(SessionSummary.session_id == session_id)
+    
+    # ========== Q&A Management ==========
+    
+    def set_session_qa(self, session_id: str, qa_pairs: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Set or update the Q&A pairs for a session"""
+        if not hasattr(self, 'session_qa'):
+            self.session_qa = self.db.table("session_qa")
+        
+        SessionQA = Query()
+        existing = self.session_qa.search(SessionQA.session_id == session_id)
+        
+        qa_obj = {
+            "session_id": session_id,
+            "qa_pairs": qa_pairs,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        if existing:
+            self.session_qa.update(qa_obj, SessionQA.session_id == session_id)
+        else:
+            self.session_qa.insert(qa_obj)
+        
+        return qa_obj
+    
+    def get_session_qa(self, session_id: str) -> Optional[List[Dict[str, str]]]:
+        """Get the Q&A pairs for a session"""
+        try:
+            if not hasattr(self, 'session_qa'):
+                self.session_qa = self.db.table("session_qa")
+            
+            SessionQA = Query()
+            result = self.session_qa.search(SessionQA.session_id == session_id)
+            return result[0].get("qa_pairs") if result else None
+        except Exception as e:
+            import logging
+            logging.warning(f"Error getting session Q&A: {e}")
+            return None
+    
+    def delete_session_qa(self, session_id: str):
+        """Delete session Q&A"""
+        if not hasattr(self, 'session_qa'):
+            self.session_qa = self.db.table("session_qa")
+        
+        SessionQA = Query()
+        self.session_qa.remove(SessionQA.session_id == session_id)
+    
+    # ========== Training Curriculum Management ==========
+    
+    def set_session_curriculum(self, session_id: str, modules: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Set or update the training curriculum for a session"""
+        if not hasattr(self, 'session_curriculum'):
+            self.session_curriculum = self.db.table("session_curriculum")
+        
+        SessionCurriculum = Query()
+        existing = self.session_curriculum.search(SessionCurriculum.session_id == session_id)
+        
+        curriculum_obj = {
+            "session_id": session_id,
+            "modules": modules,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        if existing:
+            self.session_curriculum.update(curriculum_obj, SessionCurriculum.session_id == session_id)
+        else:
+            self.session_curriculum.insert(curriculum_obj)
+        
+        return curriculum_obj
+    
+    def get_session_curriculum(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Get the training curriculum for a session"""
+        try:
+            if not hasattr(self, 'session_curriculum'):
+                self.session_curriculum = self.db.table("session_curriculum")
+            
+            SessionCurriculum = Query()
+            result = self.session_curriculum.search(SessionCurriculum.session_id == session_id)
+            return result[0].get("modules") if result else None
+        except Exception as e:
+            import logging
+            logging.warning(f"Error getting session curriculum: {e}")
+            return None
+    
+    def delete_session_curriculum(self, session_id: str):
+        """Delete session curriculum"""
+        if not hasattr(self, 'session_curriculum'):
+            self.session_curriculum = self.db.table("session_curriculum")
+        
+        SessionCurriculum = Query()
+        self.session_curriculum.remove(SessionCurriculum.session_id == session_id)
     
     # ========== Conversation Management ==========
     

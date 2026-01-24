@@ -9,10 +9,11 @@ import uuid
 import json
 import logging
 import threading
+import time
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -136,6 +137,10 @@ DEFAULT_K = CONFIG["retrieval"]["default_k"]
 MAX_K = CONFIG["retrieval"]["max_k"]
 SIMILARITY_THRESHOLD = CONFIG["retrieval"]["similarity_threshold"]
 
+# Document type constants
+VALID_DOC_TYPES = ["summary", "qa", "training_curriculum"]
+DEFAULT_DOC_TYPE = "summary"
+
 # Lazy-loaded models
 _sbert_model = None
 _local_llm = None
@@ -221,6 +226,7 @@ class UploadResponse(BaseModel):
     used_fallback: bool
     embed_provider: str
     embedding_model: str  # Specific model name used for embeddings
+    doc_type: str  # Type of document: summary, qa, or training_curriculum
 
 class QueryRequest(BaseModel):
     question: str
@@ -241,6 +247,38 @@ class QueryResponse(BaseModel):
 class ConfigSet(BaseModel):
     key_name: str
     key_value: Any
+
+class SummaryResponse(BaseModel):
+    document_id: str
+    file_name: str
+    summary: str
+    uploaded_at: str
+
+class SessionSummariesResponse(BaseModel):
+    session_id: str
+    summaries: List[SummaryResponse]
+
+class QAPair(BaseModel):
+    question: str
+    answer: str
+
+class QAResponse(BaseModel):
+    session_id: str
+    qa_pairs: List[QAPair]
+    status: str
+
+class TrainingModule(BaseModel):
+    module_id: str
+    title: str
+    objectives: List[str]
+    key_concepts: List[str]
+    duration_minutes: int
+    sequence: int
+
+class CurriculumResponse(BaseModel):
+    session_id: str
+    modules: List[TrainingModule]
+    status: str
 
 # ========== Document Processing Utils ==========
 
@@ -456,6 +494,7 @@ def embed_with_sbert(texts: List[str]) -> Optional[np.ndarray]:
 def generate_with_gemini(prompt: str, api_key: str, model_name: str = None) -> Optional[str]:
     """Generate text using Gemini API"""
     if not api_key:
+        logger.warning("❌ Gemini: No API key provided")
         return None
     
     # Use config default if not provided
@@ -476,19 +515,29 @@ def generate_with_gemini(prompt: str, api_key: str, model_name: str = None) -> O
     }
     
     try:
+        logger.info(f"📤 Sending request to Gemini API (model: {model_name}, timeout: 60s)...")
         r = requests.post(url, json=payload, timeout=60, verify=False)
+        logger.info(f"📥 Gemini API response: {r.status_code}")
         if not r.ok:
-            logger.warning(f"Gemini generate error: {r.status_code} {r.text[:200]}")
+            logger.warning(f"❌ Gemini generate error: {r.status_code} {r.text[:200]}")
             return None
         data = r.json()
         cands = data.get("candidates", [])
         if not cands:
+            logger.warning("❌ Gemini: No candidates in response")
             return None
         parts = cands[0].get("content", {}).get("parts", [])
         out = "".join(p.get("text", "") for p in parts)
-        return out.strip() or None
+        result = out.strip() or None
+        if result:
+            logger.info(f"✅ Gemini response received: {len(result)} chars")
+        else:
+            logger.warning("❌ Gemini returned empty response")
+        return result
     except Exception as e:
-        logger.warning(f"Gemini generate exception: {e}")
+        logger.error(f"❌ Gemini generate exception: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 def generate_with_chatgpt(prompt: str, api_key: str, model_name: str = "gpt-4o-mini") -> Optional[str]:
@@ -709,7 +758,881 @@ def heuristic_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
     
     return " ".join(sentences[:5])
 
-# ========== API Endpoints ==========
+def clean_summary(summary: str) -> str:
+    """Clean summary by removing file names, labels, and extra formatting"""
+    if not summary:
+        return summary
+    
+    # Remove lines that start with "[Document:" or contain file names
+    lines = summary.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        # Skip lines that contain document/file labels
+        if line.strip().startswith('[Document:') or line.strip().startswith('[Source') or line.strip().startswith('Document:'):
+            continue
+        # Skip empty lines at the start
+        if cleaned_lines or line.strip():
+            cleaned_lines.append(line)
+    
+    result = '\n'.join(cleaned_lines).strip()
+    
+    # Remove leading/trailing quotes if present
+    if result.startswith('"') and result.endswith('"'):
+        result = result[1:-1].strip()
+    
+    return result
+
+def generate_summary_with_gemini(text: str, api_key: str, doc_name: str, model_name: str = None) -> Optional[str]:
+    """Generate a concise summary using Gemini API"""
+    if not api_key or not text:
+        return None
+    
+    if model_name is None:
+        model_name = GEMINI_GEN_MODEL
+    
+    # Limit text to avoid token limits
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Generate a summary of exactly 50-60 words (no more, no less) from the following document.
+Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+
+Document:
+{text_excerpt}
+
+Summary (50-60 words only):"""
+    
+    result = generate_with_gemini(prompt, api_key, model_name)
+    if result:
+        result = clean_summary(result)
+    return result
+
+def generate_summary_with_chatgpt(text: str, api_key: str, doc_name: str, model_name: str = "gpt-4o-mini") -> Optional[str]:
+    """Generate a concise summary using ChatGPT API"""
+    if not api_key or not text:
+        return None
+    
+    # Limit text to avoid token limits
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Generate a summary of exactly 50-60 words (no more, no less) from the following document.
+Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+
+Document:
+{text_excerpt}
+
+Summary (50-60 words only):"""
+    
+    result = generate_with_chatgpt(prompt, api_key, model_name)
+    if result:
+        result = clean_summary(result)
+    return result
+
+def generate_summary_with_groq(text: str, api_key: Optional[str], doc_name: str) -> Optional[str]:
+    """Generate a concise summary using Groq API"""
+    if not text:
+        return None
+    
+    if not api_key:
+        api_key = db.get_config("groq_api_key")
+    
+    if not api_key:
+        return None
+    
+    # Limit text to avoid token limits
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Generate a summary of exactly 50-60 words (no more, no less) from the following document.
+Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+
+Document:
+{text_excerpt}
+
+Summary (50-60 words only):"""
+    
+    result = generate_with_groq(prompt, api_key)
+    if result:
+        result = clean_summary(result)
+    return result
+
+def generate_document_summary(text: str, doc_name: str, session: Dict[str, Any]) -> Optional[str]:
+    """Generate summary using primary LLM with fallbacks - returns summary or None"""
+    if not text or not text.strip():
+        return None
+    
+    # Get API keys from config
+    gemini_key = db.get_config("gemini_api_key")
+    chatgpt_key = db.get_config("chatgpt_api_key")
+    
+    primary_llm = session.get("primary_llm", "gemini")
+    
+    # Try primary LLM first
+    if primary_llm == "gemini" and gemini_key:
+        summary = generate_summary_with_gemini(text, gemini_key, doc_name, GEMINI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated summary using Gemini for {doc_name}")
+            return summary
+    elif primary_llm == "chatgpt" and chatgpt_key:
+        summary = generate_summary_with_chatgpt(text, chatgpt_key, doc_name, OPENAI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated summary using ChatGPT for {doc_name}")
+            return summary
+    
+    # Try alternative provider
+    if primary_llm != "gemini" and gemini_key:
+        logger.info("Trying Gemini as fallback for summary...")
+        summary = generate_summary_with_gemini(text, gemini_key, doc_name, GEMINI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated summary using Gemini fallback for {doc_name}")
+            return summary
+    
+    if primary_llm != "chatgpt" and chatgpt_key:
+        logger.info("Trying ChatGPT as fallback for summary...")
+        summary = generate_summary_with_chatgpt(text, chatgpt_key, doc_name, OPENAI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated summary using ChatGPT fallback for {doc_name}")
+            return summary
+    
+    # Try Groq (fast and free fallback)
+    logger.info("Trying Groq as fallback for summary...")
+    summary = generate_summary_with_groq(text, None, doc_name)
+    if summary:
+        logger.info(f"✅ Generated summary using Groq fallback for {doc_name}")
+        return summary
+    
+    logger.warning(f"⚠️ Failed to generate summary for {doc_name} - no LLM available")
+    return None
+
+def generate_session_summary(combined_text: str, session: Dict[str, Any]) -> Optional[str]:
+    """Generate consolidated summary for entire session based on all documents"""
+    if not combined_text or not combined_text.strip():
+        return None
+    
+    # Get API keys from config
+    gemini_key = db.get_config("gemini_api_key")
+    chatgpt_key = db.get_config("chatgpt_api_key")
+    
+    primary_llm = session.get("primary_llm", "gemini")
+    
+    # Limit text to avoid token limits and timeouts
+    max_chars = 5000
+    text_excerpt = combined_text[:max_chars]
+    
+    prompt = f"""Generate a consolidated summary of exactly 50-60 words (no more, no less) from all documents.
+Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+
+Documents Content:
+{text_excerpt}
+
+Consolidated Summary (50-60 words only):"""
+    
+    # Try primary LLM first
+    if primary_llm == "gemini" and gemini_key:
+        logger.info(f"[BACKGROUND] Generating session summary using Gemini...")
+        summary = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated consolidated session summary using Gemini ({len(summary)} chars, {len(summary.splitlines())} lines)")
+            return summary
+    elif primary_llm == "chatgpt" and chatgpt_key:
+        logger.info(f"[BACKGROUND] Generating session summary using ChatGPT...")
+        summary = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated consolidated session summary using ChatGPT ({len(summary)} chars, {len(summary.splitlines())} lines)")
+            return summary
+    
+    # Try alternative provider
+    if primary_llm != "gemini" and gemini_key:
+        logger.info("[BACKGROUND] Trying Gemini as fallback for session summary...")
+        summary = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated consolidated session summary using Gemini fallback ({len(summary)} chars, {len(summary.splitlines())} lines)")
+            return summary
+    
+    if primary_llm != "chatgpt" and chatgpt_key:
+        logger.info("[BACKGROUND] Trying ChatGPT as fallback for session summary...")
+        summary = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
+        if summary:
+            logger.info(f"✅ Generated consolidated session summary using ChatGPT fallback ({len(summary)} chars, {len(summary.splitlines())} lines)")
+            return summary
+    
+    # Try Groq (fast and free fallback)
+    logger.info("[BACKGROUND] Trying Groq as fallback for session summary...")
+    summary = generate_with_groq(prompt, None)
+    if summary:
+        logger.info(f"✅ Generated consolidated session summary using Groq fallback ({len(summary)} chars, {len(summary.splitlines())} lines)")
+        return summary
+    
+    logger.warning(f"⚠️ Failed to generate session summary - no LLM available")
+    return None
+
+def generate_summary_background(session_id: str, document_id: str, text: str, filename: str):
+    """Background task to generate and store consolidated session summary"""
+    try:
+        logger.info(f"[BACKGROUND] Starting session summary generation for {filename} (doc_id: {document_id})")
+        
+        # Get session
+        session = db.get_session(session_id)
+        if not session:
+            logger.error(f"[BACKGROUND] Session {session_id} not found")
+            return
+        
+        # Get all documents in session with doc_type="summary" (only summary documents)
+        all_documents = db.get_documents(session_id)
+        if not all_documents:
+            logger.warning(f"[BACKGROUND] No documents found in session {session_id}")
+            return
+        
+        # Filter to only documents marked with doc_type="summary"
+        all_documents = [doc for doc in all_documents if doc.get("doc_type", "summary") == "summary"]
+        
+        # Combine text from all documents (limit total size to avoid timeouts)
+        combined_texts = []
+        max_total_chars = 5000  # Reduced from 10000 to avoid timeout on PDF parsing
+        current_total = 0
+        
+        for doc in all_documents:
+            doc_path = doc.get("file_path")
+            if not doc_path or not os.path.exists(doc_path):
+                logger.info(f"[BACKGROUND] Skipping document {doc.get('file_name')} - path not found")
+                continue
+            
+            try:
+                logger.info(f"[BACKGROUND] Reading document: {doc.get('file_name')}")
+                # Read the original file and parse it (with size limit)
+                with open(doc_path, "rb") as f:
+                    # Only read first 1MB to avoid timeouts with large files
+                    content = f.read(1_000_000)
+                
+                # Parse based on file type
+                doc_ext = doc.get("file_type", "")
+                logger.info(f"[BACKGROUND] Parsing {doc_ext} file: {doc.get('file_name')}")
+                
+                if doc_ext == ".pdf":
+                    doc_text = parse_pdf(content)
+                elif doc_ext == ".docx":
+                    doc_text = parse_docx(content)
+                elif doc_ext == ".txt":
+                    doc_text = parse_txt(content)
+                elif doc_ext in [".md", ".markdown"]:
+                    doc_text = parse_markdown(content)
+                elif doc_ext in [".html", ".htm"]:
+                    doc_text = parse_html(content)
+                else:
+                    logger.warning(f"[BACKGROUND] Unsupported file type {doc_ext}")
+                    continue
+                
+                doc_text = normalize_text(doc_text)
+                logger.info(f"[BACKGROUND] Extracted {len(doc_text)} chars from {doc.get('file_name')}")
+                
+                # Add to combined texts if within size limit
+                if current_total + len(doc_text) <= max_total_chars:
+                    combined_texts.append(f"[Document: {doc.get('file_name')}]\n{doc_text}")
+                    current_total += len(doc_text)
+                    logger.info(f"[BACKGROUND] Added to combined text. Total: {current_total} chars")
+                else:
+                    # Truncate to fit remaining space
+                    remaining = max_total_chars - current_total
+                    if remaining > 500:
+                        combined_texts.append(f"[Document: {doc.get('file_name')}]\n{doc_text[:remaining]}")
+                        logger.info(f"[BACKGROUND] Truncated and added {doc.get('file_name')}")
+                    break
+            except Exception as e:
+                logger.error(f"[BACKGROUND] Failed to read document {doc.get('file_name')}: {e}")
+                import traceback
+                logger.error(f"[BACKGROUND] Traceback: {traceback.format_exc()}")
+                continue
+        
+        if not combined_texts:
+            logger.warning(f"[BACKGROUND] Could not extract text from any documents in session {session_id}")
+            return
+        
+        combined_text = "\n\n".join(combined_texts)
+        
+        # Generate consolidated summary for entire session
+        logger.info(f"[BACKGROUND] Generating consolidated summary for session with {len(all_documents)} document(s)")
+        session_summary = generate_session_summary(combined_text, session)
+        
+        if session_summary:
+            # Store session-level summary
+            db.set_session_summary(session_id, session_summary)
+            logger.info(f"[BACKGROUND] ✅ Session summary stored for session {session_id}")
+        else:
+            logger.warning(f"[BACKGROUND] ⚠️ Session summary generation failed for session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"[BACKGROUND] Error generating session summary: {e}")
+
+def generate_qa_with_gemini(text: str, api_key: str, model_name: str = None) -> Optional[List[Dict[str, str]]]:
+    """Generate 5-10 Q&A pairs using Gemini API"""
+    if not api_key or not text:
+        return None
+    
+    if model_name is None:
+        model_name = GEMINI_GEN_MODEL
+    
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Generate exactly 7 Q&A pairs from the following content.
+Each Q&A pair should test understanding of key concepts.
+Format as JSON array: [{{"question": "...", "answer": "..."}}, ...]
+
+Content:
+{text_excerpt}
+
+JSON Array of Q&A pairs:"""
+    
+    result = generate_with_gemini(prompt, api_key, model_name)
+    if not result:
+        logger.warning("Gemini returned empty response for Q&A generation")
+        return None
+    
+    try:
+        # Try to extract JSON from response (in case there's extra text)
+        logger.info(f"[DEBUG] Gemini Q&A response (first 500 chars): {result[:500]}")
+        
+        # Try direct JSON parsing first
+        qa_pairs = json.loads(result)
+        if isinstance(qa_pairs, list) and len(qa_pairs) > 0:
+            logger.info(f"✅ Successfully parsed {len(qa_pairs)} Q&A pairs from Gemini")
+            return qa_pairs
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse Q&A JSON from Gemini response: {e}")
+        logger.warning(f"Response was: {result[:200]}")
+        
+        # Try to extract JSON array from response (if it contains extra text)
+        try:
+            import re
+            json_match = re.search(r'\[\s*{.*}\s*\]', result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                qa_pairs = json.loads(json_str)
+                if isinstance(qa_pairs, list) and len(qa_pairs) > 0:
+                    logger.info(f"✅ Extracted {len(qa_pairs)} Q&A pairs from Gemini response")
+                    return qa_pairs
+        except Exception as e2:
+            logger.warning(f"Failed to extract JSON from response: {e2}")
+    
+    return None
+
+def generate_qa_with_chatgpt(text: str, api_key: str, model_name: str = "gpt-4o-mini") -> Optional[List[Dict[str, str]]]:
+    """Generate 5-10 Q&A pairs using ChatGPT API"""
+    if not api_key or not text:
+        return None
+    
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Generate exactly 7 Q&A pairs from the following content.
+Each Q&A pair should test understanding of key concepts.
+Format as JSON array: [{{"question": "...", "answer": "..."}}, ...]
+
+Content:
+{text_excerpt}
+
+JSON Array of Q&A pairs:"""
+    
+    result = generate_with_chatgpt(prompt, api_key, model_name)
+    if not result:
+        logger.warning("ChatGPT returned empty response for Q&A generation")
+        return None
+    
+    try:
+        logger.info(f"[DEBUG] ChatGPT Q&A response (first 500 chars): {result[:500]}")
+        qa_pairs = json.loads(result)
+        if isinstance(qa_pairs, list) and len(qa_pairs) > 0:
+            logger.info(f"✅ Successfully parsed {len(qa_pairs)} Q&A pairs from ChatGPT")
+            return qa_pairs
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse Q&A JSON from ChatGPT response: {e}")
+        logger.warning(f"Response was: {result[:200]}")
+        
+        # Try to extract JSON array from response
+        try:
+            import re
+            json_match = re.search(r'\[\s*{.*}\s*\]', result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                qa_pairs = json.loads(json_str)
+                if isinstance(qa_pairs, list) and len(qa_pairs) > 0:
+                    logger.info(f"✅ Extracted {len(qa_pairs)} Q&A pairs from ChatGPT response")
+                    return qa_pairs
+        except Exception as e2:
+            logger.warning(f"Failed to extract JSON from response: {e2}")
+    
+    return None
+
+def generate_qa_with_groq(text: str, api_key: Optional[str]) -> Optional[List[Dict[str, str]]]:
+    """Generate 5-10 Q&A pairs using Groq API"""
+    if not text:
+        return None
+    
+    if not api_key:
+        api_key = db.get_config("groq_api_key")
+    
+    if not api_key:
+        return None
+    
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Generate exactly 7 Q&A pairs from the following content.
+Each Q&A pair should test understanding of key concepts.
+Format as JSON array: [{{"question": "...", "answer": "..."}}, ...]
+
+Content:
+{text_excerpt}
+
+JSON Array of Q&A pairs:"""
+    
+    result = generate_with_groq(prompt, api_key)
+    if not result:
+        logger.warning("Groq returned empty response for Q&A generation")
+        return None
+    
+    try:
+        logger.info(f"[DEBUG] Groq Q&A response (first 500 chars): {result[:500]}")
+        qa_pairs = json.loads(result)
+        if isinstance(qa_pairs, list) and len(qa_pairs) > 0:
+            logger.info(f"✅ Successfully parsed {len(qa_pairs)} Q&A pairs from Groq")
+            return qa_pairs
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse Q&A JSON from Groq response: {e}")
+        logger.warning(f"Response was: {result[:200]}")
+        
+        # Try to extract JSON array from response
+        try:
+            import re
+            json_match = re.search(r'\[\s*{.*}\s*\]', result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                qa_pairs = json.loads(json_str)
+                if isinstance(qa_pairs, list) and len(qa_pairs) > 0:
+                    logger.info(f"✅ Extracted {len(qa_pairs)} Q&A pairs from Groq response")
+                    return qa_pairs
+        except Exception as e2:
+            logger.warning(f"Failed to extract JSON from response: {e2}")
+    
+    return None
+
+def generate_session_qa(combined_text: str, session: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
+    """Generate Q&A pairs for entire session based on all documents"""
+    if not combined_text or not combined_text.strip():
+        return None
+    
+    gemini_key = db.get_config("gemini_api_key")
+    chatgpt_key = db.get_config("chatgpt_api_key")
+    primary_llm = session.get("primary_llm", "gemini")
+    
+    if primary_llm == "gemini" and gemini_key:
+        logger.info("[BACKGROUND] Generating Q&A using Gemini...")
+        qa_pairs = generate_qa_with_gemini(combined_text, gemini_key, GEMINI_GEN_MODEL)
+        if qa_pairs:
+            logger.info(f"✅ Generated {len(qa_pairs)} Q&A pairs using Gemini")
+            return qa_pairs
+    elif primary_llm == "chatgpt" and chatgpt_key:
+        logger.info("[BACKGROUND] Generating Q&A using ChatGPT...")
+        qa_pairs = generate_qa_with_chatgpt(combined_text, chatgpt_key, OPENAI_GEN_MODEL)
+        if qa_pairs:
+            logger.info(f"✅ Generated {len(qa_pairs)} Q&A pairs using ChatGPT")
+            return qa_pairs
+    
+    if primary_llm != "gemini" and gemini_key:
+        logger.info("[BACKGROUND] Trying Gemini as fallback for Q&A...")
+        qa_pairs = generate_qa_with_gemini(combined_text, gemini_key, GEMINI_GEN_MODEL)
+        if qa_pairs:
+            logger.info(f"✅ Generated {len(qa_pairs)} Q&A pairs using Gemini fallback")
+            return qa_pairs
+    
+    if primary_llm != "chatgpt" and chatgpt_key:
+        logger.info("[BACKGROUND] Trying ChatGPT as fallback for Q&A...")
+        qa_pairs = generate_qa_with_chatgpt(combined_text, chatgpt_key, OPENAI_GEN_MODEL)
+        if qa_pairs:
+            logger.info(f"✅ Generated {len(qa_pairs)} Q&A pairs using ChatGPT fallback")
+            return qa_pairs
+    
+    logger.info("[BACKGROUND] Trying Groq as fallback for Q&A...")
+    qa_pairs = generate_qa_with_groq(combined_text, None)
+    if qa_pairs:
+        logger.info(f"✅ Generated {len(qa_pairs)} Q&A pairs using Groq fallback")
+        return qa_pairs
+    
+    logger.warning("[BACKGROUND] ⚠️ Failed to generate Q&A pairs - no LLM available")
+    return None
+
+def generate_curriculum_with_gemini(text: str, api_key: str, model_name: str = None) -> Optional[List[Dict[str, Any]]]:
+    """Generate training curriculum modules using Gemini API"""
+    if not api_key or not text:
+        return None
+    
+    if model_name is None:
+        model_name = GEMINI_GEN_MODEL
+    
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Create a training curriculum with 4-5 modules from the following content.
+Each module should be progressive and build on previous knowledge.
+Format as JSON array: [{{"title": "...", "objectives": ["...", "..."], "key_concepts": ["...", "..."], "duration_minutes": 30}}]
+
+Content:
+{text_excerpt}
+
+JSON Array of modules (4-5 modules):"""
+    
+    result = generate_with_gemini(prompt, api_key, model_name)
+    if not result:
+        logger.warning("Gemini returned empty response for curriculum generation")
+        return None
+    
+    try:
+        logger.info(f"[DEBUG] Gemini curriculum response (first 500 chars): {result[:500]}")
+        modules = json.loads(result)
+        if isinstance(modules, list) and len(modules) > 0:
+            logger.info(f"✅ Successfully parsed {len(modules)} curriculum modules from Gemini")
+            return modules
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse curriculum JSON from Gemini response: {e}")
+        logger.warning(f"Response was: {result[:200]}")
+        
+        # Try to extract JSON array from response
+        try:
+            import re
+            json_match = re.search(r'\[\s*{.*}\s*\]', result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                modules = json.loads(json_str)
+                if isinstance(modules, list) and len(modules) > 0:
+                    logger.info(f"✅ Extracted {len(modules)} curriculum modules from Gemini response")
+                    return modules
+        except Exception as e2:
+            logger.warning(f"Failed to extract JSON from response: {e2}")
+    
+    return None
+
+def generate_curriculum_with_chatgpt(text: str, api_key: str, model_name: str = "gpt-4o-mini") -> Optional[List[Dict[str, Any]]]:
+    """Generate training curriculum modules using ChatGPT API"""
+    if not api_key or not text:
+        return None
+    
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Create a training curriculum with 4-5 modules from the following content.
+Each module should be progressive and build on previous knowledge.
+Format as JSON array: [{{"title": "...", "objectives": ["...", "..."], "key_concepts": ["...", "..."], "duration_minutes": 30}}]
+
+Content:
+{text_excerpt}
+
+JSON Array of modules (4-5 modules):"""
+    
+    result = generate_with_chatgpt(prompt, api_key, model_name)
+    if not result:
+        logger.warning("ChatGPT returned empty response for curriculum generation")
+        return None
+    
+    try:
+        logger.info(f"[DEBUG] ChatGPT curriculum response (first 500 chars): {result[:500]}")
+        modules = json.loads(result)
+        if isinstance(modules, list) and len(modules) > 0:
+            logger.info(f"✅ Successfully parsed {len(modules)} curriculum modules from ChatGPT")
+            return modules
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse curriculum JSON from ChatGPT response: {e}")
+        logger.warning(f"Response was: {result[:200]}")
+        
+        # Try to extract JSON array from response
+        try:
+            import re
+            json_match = re.search(r'\[\s*{.*}\s*\]', result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                modules = json.loads(json_str)
+                if isinstance(modules, list) and len(modules) > 0:
+                    logger.info(f"✅ Extracted {len(modules)} curriculum modules from ChatGPT response")
+                    return modules
+        except Exception as e2:
+            logger.warning(f"Failed to extract JSON from response: {e2}")
+    
+    return None
+
+def generate_curriculum_with_groq(text: str, api_key: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    """Generate training curriculum modules using Groq API"""
+    if not text:
+        return None
+    
+    if not api_key:
+        api_key = db.get_config("groq_api_key")
+    
+    if not api_key:
+        return None
+    
+    max_chars = 5000
+    text_excerpt = text[:max_chars]
+    
+    prompt = f"""Create a training curriculum with 4-5 modules from the following content.
+Each module should be progressive and build on previous knowledge.
+Format as JSON array: [{{"title": "...", "objectives": ["...", "..."], "key_concepts": ["...", "..."], "duration_minutes": 30}}]
+
+Content:
+{text_excerpt}
+
+JSON Array of modules (4-5 modules):"""
+    
+    result = generate_with_groq(prompt, api_key)
+    if not result:
+        logger.warning("Groq returned empty response for curriculum generation")
+        return None
+    
+    try:
+        logger.info(f"[DEBUG] Groq curriculum response (first 500 chars): {result[:500]}")
+        modules = json.loads(result)
+        if isinstance(modules, list) and len(modules) > 0:
+            logger.info(f"✅ Successfully parsed {len(modules)} curriculum modules from Groq")
+            return modules
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse curriculum JSON from Groq response: {e}")
+        logger.warning(f"Response was: {result[:200]}")
+        
+        # Try to extract JSON array from response
+        try:
+            import re
+            json_match = re.search(r'\[\s*{.*}\s*\]', result, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                modules = json.loads(json_str)
+                if isinstance(modules, list) and len(modules) > 0:
+                    logger.info(f"✅ Extracted {len(modules)} curriculum modules from Groq response")
+                    return modules
+        except Exception as e2:
+            logger.warning(f"Failed to extract JSON from response: {e2}")
+    
+    return None
+
+def generate_session_curriculum(combined_text: str, session: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Generate training curriculum for entire session based on all documents"""
+    if not combined_text or not combined_text.strip():
+        return None
+    
+    gemini_key = db.get_config("gemini_api_key")
+    chatgpt_key = db.get_config("chatgpt_api_key")
+    primary_llm = session.get("primary_llm", "gemini")
+    
+    if primary_llm == "gemini" and gemini_key:
+        logger.info("[BACKGROUND] Generating curriculum using Gemini...")
+        modules = generate_curriculum_with_gemini(combined_text, gemini_key, GEMINI_GEN_MODEL)
+        if modules:
+            logger.info(f"✅ Generated {len(modules)} curriculum modules using Gemini")
+            return modules
+    elif primary_llm == "chatgpt" and chatgpt_key:
+        logger.info("[BACKGROUND] Generating curriculum using ChatGPT...")
+        modules = generate_curriculum_with_chatgpt(combined_text, chatgpt_key, OPENAI_GEN_MODEL)
+        if modules:
+            logger.info(f"✅ Generated {len(modules)} curriculum modules using ChatGPT")
+            return modules
+    
+    if primary_llm != "gemini" and gemini_key:
+        logger.info("[BACKGROUND] Trying Gemini as fallback for curriculum...")
+        modules = generate_curriculum_with_gemini(combined_text, gemini_key, GEMINI_GEN_MODEL)
+        if modules:
+            logger.info(f"✅ Generated {len(modules)} curriculum modules using Gemini fallback")
+            return modules
+    
+    if primary_llm != "chatgpt" and chatgpt_key:
+        logger.info("[BACKGROUND] Trying ChatGPT as fallback for curriculum...")
+        modules = generate_curriculum_with_chatgpt(combined_text, chatgpt_key, OPENAI_GEN_MODEL)
+        if modules:
+            logger.info(f"✅ Generated {len(modules)} curriculum modules using ChatGPT fallback")
+            return modules
+    
+    logger.info("[BACKGROUND] Trying Groq as fallback for curriculum...")
+    modules = generate_curriculum_with_groq(combined_text, None)
+    if modules:
+        logger.info(f"✅ Generated {len(modules)} curriculum modules using Groq fallback")
+        return modules
+    
+    logger.warning("[BACKGROUND] ⚠️ Failed to generate curriculum - no LLM available")
+    return None
+
+def generate_qa_background(session_id: str, document_id: str, text: str, filename: str):
+    """Background task to generate and store session Q&A pairs"""
+    try:
+        logger.info(f"[BACKGROUND] Starting Q&A generation for {filename} (doc_id: {document_id})")
+        
+        session = db.get_session(session_id)
+        if not session:
+            logger.error(f"[BACKGROUND] Session {session_id} not found")
+            return
+        
+        all_documents = db.get_documents(session_id)
+        if not all_documents:
+            logger.warning(f"[BACKGROUND] No documents found in session {session_id}")
+            return
+        
+        # Filter to only documents marked with doc_type="qa"
+        all_documents = [doc for doc in all_documents if doc.get("doc_type", "summary") == "qa"]
+        
+        combined_texts = []
+        max_total_chars = 5000
+        current_total = 0
+        
+        for doc in all_documents:
+            doc_path = doc.get("file_path")
+            if not doc_path or not os.path.exists(doc_path):
+                logger.info(f"[BACKGROUND] Skipping document {doc.get('file_name')} - path not found")
+                continue
+            
+            try:
+                logger.info(f"[BACKGROUND] Reading document: {doc.get('file_name')}")
+                with open(doc_path, "rb") as f:
+                    content = f.read(1_000_000)
+                
+                doc_ext = doc.get("file_type", "")
+                logger.info(f"[BACKGROUND] Parsing {doc_ext} file: {doc.get('file_name')}")
+                
+                if doc_ext == ".pdf":
+                    doc_text = parse_pdf(content)
+                elif doc_ext == ".docx":
+                    doc_text = parse_docx(content)
+                elif doc_ext == ".txt":
+                    doc_text = parse_txt(content)
+                elif doc_ext in [".md", ".markdown"]:
+                    doc_text = parse_markdown(content)
+                elif doc_ext in [".html", ".htm"]:
+                    doc_text = parse_html(content)
+                else:
+                    logger.warning(f"[BACKGROUND] Unsupported file type {doc_ext}")
+                    continue
+                
+                doc_text = normalize_text(doc_text)
+                logger.info(f"[BACKGROUND] Extracted {len(doc_text)} chars from {doc.get('file_name')}")
+                
+                if current_total + len(doc_text) <= max_total_chars:
+                    combined_texts.append(f"[Document: {doc.get('file_name')}]\n{doc_text}")
+                    current_total += len(doc_text)
+                    logger.info(f"[BACKGROUND] Added to combined text. Total: {current_total} chars")
+                else:
+                    remaining = max_total_chars - current_total
+                    if remaining > 500:
+                        combined_texts.append(f"[Document: {doc.get('file_name')}]\n{doc_text[:remaining]}")
+                        logger.info(f"[BACKGROUND] Truncated and added {doc.get('file_name')}")
+                    break
+            except Exception as e:
+                logger.error(f"[BACKGROUND] Failed to read document {doc.get('file_name')}: {e}")
+                import traceback
+                logger.error(f"[BACKGROUND] Traceback: {traceback.format_exc()}")
+                continue
+        
+        if not combined_texts:
+            logger.warning(f"[BACKGROUND] Could not extract text from any documents in session {session_id}")
+            return
+        
+        combined_text = "\n\n".join(combined_texts)
+        
+        logger.info(f"[BACKGROUND] Generating Q&A pairs for session with {len(all_documents)} document(s)")
+        qa_pairs = generate_session_qa(combined_text, session)
+        
+        if qa_pairs:
+            db.set_session_qa(session_id, qa_pairs)
+            logger.info(f"[BACKGROUND] ✅ Session Q&A stored for session {session_id} ({len(qa_pairs)} pairs)")
+        else:
+            logger.warning(f"[BACKGROUND] ⚠️ Q&A generation failed for session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"[BACKGROUND] Error generating Q&A: {e}")
+
+def generate_curriculum_background(session_id: str, document_id: str, text: str, filename: str):
+    """Background task to generate and store session training curriculum"""
+    try:
+        logger.info(f"[BACKGROUND] Starting curriculum generation for {filename} (doc_id: {document_id})")
+        
+        session = db.get_session(session_id)
+        if not session:
+            logger.error(f"[BACKGROUND] Session {session_id} not found")
+            return
+        
+        all_documents = db.get_documents(session_id)
+        if not all_documents:
+            logger.warning(f"[BACKGROUND] No documents found in session {session_id}")
+            return
+        
+        # Filter to only documents marked with doc_type="training_curriculum"
+        all_documents = [doc for doc in all_documents if doc.get("doc_type", "summary") == "training_curriculum"]
+        
+        combined_texts = []
+        max_total_chars = 5000
+        current_total = 0
+        
+        for doc in all_documents:
+            doc_path = doc.get("file_path")
+            if not doc_path or not os.path.exists(doc_path):
+                logger.info(f"[BACKGROUND] Skipping document {doc.get('file_name')} - path not found")
+                continue
+            
+            try:
+                logger.info(f"[BACKGROUND] Reading document: {doc.get('file_name')}")
+                with open(doc_path, "rb") as f:
+                    content = f.read(1_000_000)
+                
+                doc_ext = doc.get("file_type", "")
+                logger.info(f"[BACKGROUND] Parsing {doc_ext} file: {doc.get('file_name')}")
+                
+                if doc_ext == ".pdf":
+                    doc_text = parse_pdf(content)
+                elif doc_ext == ".docx":
+                    doc_text = parse_docx(content)
+                elif doc_ext == ".txt":
+                    doc_text = parse_txt(content)
+                elif doc_ext in [".md", ".markdown"]:
+                    doc_text = parse_markdown(content)
+                elif doc_ext in [".html", ".htm"]:
+                    doc_text = parse_html(content)
+                else:
+                    logger.warning(f"[BACKGROUND] Unsupported file type {doc_ext}")
+                    continue
+                
+                doc_text = normalize_text(doc_text)
+                logger.info(f"[BACKGROUND] Extracted {len(doc_text)} chars from {doc.get('file_name')}")
+                
+                if current_total + len(doc_text) <= max_total_chars:
+                    combined_texts.append(f"[Document: {doc.get('file_name')}]\n{doc_text}")
+                    current_total += len(doc_text)
+                    logger.info(f"[BACKGROUND] Added to combined text. Total: {current_total} chars")
+                else:
+                    remaining = max_total_chars - current_total
+                    if remaining > 500:
+                        combined_texts.append(f"[Document: {doc.get('file_name')}]\n{doc_text[:remaining]}")
+                        logger.info(f"[BACKGROUND] Truncated and added {doc.get('file_name')}")
+                    break
+            except Exception as e:
+                logger.error(f"[BACKGROUND] Failed to read document {doc.get('file_name')}: {e}")
+                import traceback
+                logger.error(f"[BACKGROUND] Traceback: {traceback.format_exc()}")
+                continue
+        
+        if not combined_texts:
+            logger.warning(f"[BACKGROUND] Could not extract text from any documents in session {session_id}")
+            return
+        
+        combined_text = "\n\n".join(combined_texts)
+        
+        logger.info(f"[BACKGROUND] Generating curriculum for session with {len(all_documents)} document(s)")
+        modules = generate_session_curriculum(combined_text, session)
+        
+        if modules:
+            db.set_session_curriculum(session_id, modules)
+            logger.info(f"[BACKGROUND] ✅ Session curriculum stored for session {session_id} ({len(modules)} modules)")
+        else:
+            logger.warning(f"[BACKGROUND] ⚠️ Curriculum generation failed for session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"[BACKGROUND] Error generating curriculum: {e}")
+
+# ========== API Endpoints ==========""
 
 @app.get("/health")
 async def health():
@@ -818,6 +1741,9 @@ async def delete_session(session_id: str):
         # Delete session data from database
         db.delete_session(session_id)
         
+        # Delete session summary
+        db.delete_session_summary(session_id)
+        
         # Delete FAISS index
         faiss_manager.delete_index(session_id)
         
@@ -839,10 +1765,19 @@ async def delete_session(session_id: str):
 @app.post("/sessions/{session_id}/upload", response_model=UploadResponse)
 async def upload_document(
     session_id: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    doc_type: str = Form(default=DEFAULT_DOC_TYPE),
+    background_tasks: BackgroundTasks = None
 ):
-    """Upload a document to a session"""
+    """Upload a document to a session with doc_type (summary, qa, or training_curriculum)"""
     try:
+        # Debug logging to verify doc_type is received
+        logger.info(f"📤 Upload endpoint received: doc_type='{doc_type}' (DEFAULT: {DEFAULT_DOC_TYPE})")
+        
+        # Validate doc_type
+        if doc_type not in VALID_DOC_TYPES:
+            raise HTTPException(status_code=400, detail=f"Invalid doc_type. Must be one of: {', '.join(VALID_DOC_TYPES)}")
+        
         # Verify session exists
         session = db.get_session(session_id)
         if not session:
@@ -921,10 +1856,25 @@ async def upload_document(
         metadata = [{"text": c["text"], "doc": c["doc"], "chunk": c["chunk"]} for c in chunks]
         faiss_manager.add_vectors(session_id, vecs, metadata)
         
-        # Save document info to database
-        document = db.add_document(session_id, filename, ext, file_path, len(chunks))
+        # Save document info to database (with empty summary initially and doc_type)
+        document = db.add_document(session_id, filename, ext, file_path, len(chunks), summary="", doc_type=doc_type)
+        doc_id = document["document_id"]
         
-        logger.info(f"Uploaded {filename} to session {session_id} with {len(chunks)} chunks")
+        # Start background task based on doc_type (non-blocking)
+        if background_tasks:
+            if doc_type == "summary":
+                logger.info(f"📝 Queued background task to generate summary for {filename}")
+                background_tasks.add_task(generate_summary_background, session_id, doc_id, text, filename)
+            elif doc_type == "qa":
+                logger.info(f"❓ Queued background task to generate Q&A for {filename}")
+                background_tasks.add_task(generate_qa_background, session_id, doc_id, text, filename)
+            elif doc_type == "training_curriculum":
+                logger.info(f"📚 Queued background task to generate curriculum for {filename}")
+                background_tasks.add_task(generate_curriculum_background, session_id, doc_id, text, filename)
+        else:
+            logger.warning("⚠️ BackgroundTasks not available, content generation skipped")
+        
+        logger.info(f"Uploaded {filename} to session {session_id} with {len(chunks)} chunks (doc_type: {doc_type})")
         
         return UploadResponse(
             document_id=document["document_id"],
@@ -933,7 +1883,8 @@ async def upload_document(
             chunks_indexed=len(chunks),
             used_fallback=used_fallback,
             embed_provider=embed_provider,
-            embedding_model=embedding_model
+            embedding_model=embedding_model,
+            doc_type=doc_type
         )
         
     except HTTPException:
@@ -958,12 +1909,215 @@ async def list_documents(session_id: str):
         logger.error(f"Failed to list documents: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
+# ========== Document Summaries ==========
+
+@app.get("/sessions/{session_id}/summary")
+async def get_session_summary(session_id: str):
+    """Get the consolidated summary for an entire session"""
+    try:
+        logger.info(f"📋 Fetching session summary for {session_id}")
+        
+        session = db.get_session(session_id)
+        if not session:
+            logger.warning(f"Session {session_id} not found")
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        summary = db.get_session_summary(session_id)
+        
+        if summary:
+            logger.info(f"✅ Summary found for session {session_id} ({len(summary)} chars)")
+        else:
+            logger.info(f"⏳ No summary yet for session {session_id} - still generating")
+        
+        return {
+            "session_id": session_id,
+            "summary": summary or "",
+            "status": "ready" if summary else "generating"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get session summary: {str(e)}")
+
+# ========== Document Summaries (Legacy) ==========
+
+@app.get("/sessions/{session_id}/summaries", response_model=SessionSummariesResponse)
+async def get_session_summaries(session_id: str):
+    """Get all document summaries for a session (Legacy - use /summary for consolidated summary)"""
+    try:
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        summaries_data = db.get_summaries_by_session(session_id)
+        summaries = [
+            SummaryResponse(
+                document_id=doc["document_id"],
+                file_name=doc["file_name"],
+                summary=doc["summary"],
+                uploaded_at=doc["uploaded_at"]
+            )
+            for doc in summaries_data
+        ]
+        
+        return SessionSummariesResponse(session_id=session_id, summaries=summaries)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session summaries: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get session summaries: {str(e)}")
+
+@app.get("/sessions/{session_id}/documents/{document_id}/summary", response_model=SummaryResponse)
+async def get_document_summary(session_id: str, document_id: str):
+    """Get summary for a specific document in a session"""
+    try:
+        # Verify session exists
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Get document
+        document = db.get_document(document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Verify document belongs to session
+        if document.get("session_id") != session_id:
+            raise HTTPException(status_code=404, detail="Document not found in this session")
+        
+        return SummaryResponse(
+            document_id=document["document_id"],
+            file_name=document["file_name"],
+            summary=document.get("summary", ""),
+            uploaded_at=document["uploaded_at"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document summary: {str(e)}")
+
+# ========== Q&A Endpoints ==========
+
+@app.get("/sessions/{session_id}/qa", response_model=QAResponse)
+async def get_session_qa(session_id: str):
+    """Get the Q&A pairs for an entire session"""
+    try:
+        logger.info(f"❓ Fetching session Q&A for {session_id}")
+        
+        session = db.get_session(session_id)
+        if not session:
+            logger.warning(f"Session {session_id} not found")
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        qa_pairs = db.get_session_qa(session_id)
+        
+        if qa_pairs:
+            logger.info(f"✅ Q&A found for session {session_id} ({len(qa_pairs)} pairs)")
+        else:
+            logger.info(f"⏳ No Q&A yet for session {session_id} - still generating")
+        
+        return QAResponse(
+            session_id=session_id,
+            qa_pairs=qa_pairs or [],
+            status="ready" if qa_pairs else "generating"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session Q&A: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get session Q&A: {str(e)}")
+
+# ========== Training Curriculum Endpoints ==========
+
+@app.get("/sessions/{session_id}/curriculum", response_model=CurriculumResponse)
+async def get_session_curriculum(session_id: str):
+    """Get the training curriculum for an entire session"""
+    try:
+        logger.info(f"📚 Fetching session curriculum for {session_id}")
+        
+        session = db.get_session(session_id)
+        if not session:
+            logger.warning(f"Session {session_id} not found")
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        modules_data = db.get_session_curriculum(session_id)
+        
+        if modules_data:
+            # Convert to TrainingModule objects with IDs
+            modules = []
+            for i, mod in enumerate(modules_data):
+                modules.append(TrainingModule(
+                    module_id=str(i),
+                    title=mod.get("title", ""),
+                    objectives=mod.get("objectives", []),
+                    key_concepts=mod.get("key_concepts", []),
+                    duration_minutes=mod.get("duration_minutes", 30),
+                    sequence=i + 1
+                ))
+            logger.info(f"✅ Curriculum found for session {session_id} ({len(modules)} modules)")
+        else:
+            modules = []
+            logger.info(f"⏳ No curriculum yet for session {session_id} - still generating")
+        
+        return CurriculumResponse(
+            session_id=session_id,
+            modules=modules,
+            status="ready" if modules else "generating"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session curriculum: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get session curriculum: {str(e)}")
+
+@app.get("/sessions/{session_id}/curriculum/modules/{module_id}", response_model=TrainingModule)
+async def get_curriculum_module(session_id: str, module_id: str):
+    """Get a specific training module from session curriculum"""
+    try:
+        logger.info(f"📚 Fetching curriculum module {module_id} for session {session_id}")
+        
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        modules_data = db.get_session_curriculum(session_id)
+        if not modules_data:
+            raise HTTPException(status_code=404, detail="No curriculum found for this session")
+        
+        try:
+            idx = int(module_id)
+            if idx < 0 or idx >= len(modules_data):
+                raise HTTPException(status_code=404, detail="Module not found")
+            
+            mod = modules_data[idx]
+            return TrainingModule(
+                module_id=module_id,
+                title=mod.get("title", ""),
+                objectives=mod.get("objectives", []),
+                key_concepts=mod.get("key_concepts", []),
+                duration_minutes=mod.get("duration_minutes", 30),
+                sequence=idx + 1
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid module_id format")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get curriculum module: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get curriculum module: {str(e)}")
+
 # ========== Query / Conversation ==========
 
 @app.post("/sessions/{session_id}/query", response_model=QueryResponse)
 async def query_session(session_id: str, query: QueryRequest):
     """Query a session's documents"""
     try:
+        query_start_time = time.time()
+        logger.info(f"🚀 Query started: {query.question[:50]}...")
+        
         # Validate and clamp k value (ensure it's between 1 and MAX_K)
         query.k = min(max(1, query.k), MAX_K)
         
@@ -1010,41 +2164,48 @@ async def query_session(session_id: str, query: QueryRequest):
         
         # Hybrid search: Vector (FAISS) + Keyword (BM25)
         try:
-            # Vector search with FAISS
+            logger.info(f"🔍 Starting hybrid search for query: {question[:50]}...")
+            
+            # Vector search with FAISS - get initial results
+            start_time = time.time()
             vector_chunks = faiss_manager.search(session_id, q_vec, k=query.k * 2)  # Get more for hybrid
+            vector_time = time.time() - start_time
+            logger.info(f"⏱️ Vector search took {vector_time:.2f}s, found {len(vector_chunks)} chunks")
             
-            # Get all chunks from index for BM25
-            index_result = faiss_manager.load_index(session_id)
-            bm25_scores_dict = {}
+            # Only process top chunks for BM25 (not all chunks!)
+            # This is the key optimization - don't load entire index
             bm25_chunks = []
-            
-            if index_result:
-                _, all_metadata = index_result
+            if vector_chunks:
+                start_time = time.time()
                 question_tokens = question.lower().split()
                 
-                if all_metadata and question_tokens:
-                    # Prepare corpus for BM25
+                # Only use top vector chunks for BM25 (not ALL chunks)
+                chunks_to_score = vector_chunks[:query.k * 2]
+                
+                if chunks_to_score and question_tokens:
+                    # Prepare corpus for BM25 from top chunks only
                     corpus = []
-                    for meta in all_metadata:
-                        text = meta.get("text", "")
+                    for chunk in chunks_to_score:
+                        text = chunk.get("text", "")
                         tokens = text.lower().split()
                         corpus.append(tokens)
                     
                     if corpus:
-                        # Perform BM25 keyword search
+                        # Perform BM25 keyword search on top chunks only
                         bm25 = BM25Okapi(corpus)
                         bm25_scores = bm25.get_scores(question_tokens)
                         
-                        # Create BM25 scores dictionary
-                        bm25_scores_dict = {all_metadata[i].get("text", ""): bm25_scores[i] for i in range(len(all_metadata))}
-                        
-                        # Score all chunks with BM25 and get top k
-                        bm25_scored = [(all_metadata[i], bm25_scores[i]) for i in range(len(all_metadata))]
+                        # Score top chunks with BM25 and get top k
+                        bm25_scored = [(chunks_to_score[i], bm25_scores[i]) for i in range(len(chunks_to_score))]
                         bm25_scored.sort(key=lambda x: x[1], reverse=True)
                         bm25_chunks = [chunk for chunk, score in bm25_scored[:query.k]]
+                
+                bm25_time = time.time() - start_time
+                logger.info(f"⏱️ BM25 search took {bm25_time:.2f}s on {len(chunks_to_score)} chunks")
             
             # Combine vector and BM25 results
             vector_scores = {chunk.get("text", ""): chunk.get("score", 0) for chunk in vector_chunks}
+            bm25_scores_dict = {chunk.get("text", ""): chunk.get("score", 0) for chunk in bm25_chunks}
             
             # Normalize scores to 0-1 range for combination
             if vector_chunks:
@@ -1052,8 +2213,8 @@ async def query_session(session_id: str, query: QueryRequest):
                 if max_vec_score > 0:
                     vector_scores = {k: v / max_vec_score for k, v in vector_scores.items()}
             
-            if bm25_scores_dict:
-                max_bm25_score = max(bm25_scores_dict.values()) or 1
+            if bm25_chunks:
+                max_bm25_score = max([c.get("score", 0) for c in bm25_chunks]) or 1
                 if max_bm25_score > 0:
                     bm25_scores_dict = {k: v / max_bm25_score for k, v in bm25_scores_dict.items()}
             
@@ -1068,16 +2229,10 @@ async def query_session(session_id: str, query: QueryRequest):
                 combined_scores[text] = vector_scores.get(text, 0) * 0.7
             
             # Add BM25 scores to combined scores
-            for text, bm25_score in bm25_scores_dict.items():
-                if text in all_chunks_dict:
-                    combined_scores[text] = combined_scores.get(text, 0) + (bm25_score * 0.3)
-                elif bm25_chunks:
-                    # Find chunk by text
-                    for chunk in bm25_chunks:
-                        if chunk.get("text", "") == text:
-                            all_chunks_dict[text] = chunk
-                            combined_scores[text] = (bm25_score * 0.3)
-                            break
+            for chunk in bm25_chunks:
+                text = chunk.get("text", "")
+                all_chunks_dict[text] = chunk
+                combined_scores[text] = combined_scores.get(text, 0) + (bm25_scores_dict.get(text, 0) * 0.3)
             
             # Sort by combined score and take top k
             sorted_chunks = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
@@ -1103,10 +2258,84 @@ async def query_session(session_id: str, query: QueryRequest):
         llm_model = ""
         generation_fallback = False
         if not top_chunks:
-            # No chunks found at all - truly out of context
-            answer = "I'm sorry, but I couldn't find relevant information in the documents to answer your question. The query appears to be out of context."
-            llm_used = "out-of-context"
-            llm_model = "N/A (out of context)"
+            # No chunks found - ask LLM directly without document context
+            logger.info(f"⚠️ No relevant chunks found in documents. Asking LLM directly...")
+            session_name = session.get("session_name", "the domain")
+            
+            # Refined prompt: focused on concept + relevance to session type
+            # Works for ANY session type (technical, business, etc.)
+            prompt = (
+                f"You're providing training/learning support for: {session_name}\n\n"
+                f"Question: {question}\n\n"
+                f"The uploaded documents don't contain information about this. "
+                f"Using your knowledge, explain this in a way that's relevant to {session_name}. "
+                f"Include:\n"
+                f"- What is this concept/topic?\n"
+                f"- How does it apply or relate to {session_name}?\n\n"
+                f"Keep response under 50 words. Provide one integrated answer (don't separate)."
+            )
+            
+            # Log the prompt being sent to LLM
+            logger.info(f"\n{'='*80}")
+            logger.info(f"📝 PROMPT BEING SENT TO LLM (NO-CHUNKS FOUND - DIRECT QUERY):")
+            logger.info(f"{'='*80}")
+            logger.info(f"{prompt}")
+            logger.info(f"{'='*80}\n")
+            
+            # Try LLM fallback chain with session context
+            answer = None
+            llm_used = "no-chunks-llm"
+            
+            start_time = time.time()
+            # Try ChatGPT first
+            if chatgpt_key:
+                logger.info("🔴 Trying ChatGPT (1st priority) with session context...")
+                answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
+                elapsed = time.time() - start_time
+                if answer:
+                    llm_model = OPENAI_GEN_MODEL
+                    llm_used = "chatgpt-no-chunks"
+                    generation_fallback = True
+                    logger.info(f"✅ ChatGPT with session context took {elapsed:.2f}s - SUCCESS")
+                else:
+                    logger.warning(f"❌ ChatGPT returned None after {elapsed:.2f}s")
+            
+            # Fallback to Gemini if ChatGPT fails
+            if answer is None and gemini_key:
+                logger.info("🔴 Trying Gemini (2nd priority) with session context...")
+                answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
+                elapsed = time.time() - start_time
+                if answer:
+                    llm_model = GEMINI_GEN_MODEL
+                    llm_used = "gemini-no-chunks"
+                    generation_fallback = True
+                    logger.info(f"✅ Gemini with session context took {elapsed:.2f}s - SUCCESS")
+                else:
+                    logger.warning(f"❌ Gemini returned None after {elapsed:.2f}s")
+            
+            # Fallback to Groq
+            if answer is None:
+                logger.info("🔴 Trying Groq with session context...")
+                answer = generate_with_groq(prompt)
+                elapsed = time.time() - start_time
+                if answer:
+                    llm_model = GROQ_GEN_MODEL
+                    llm_used = "groq-no-chunks"
+                    generation_fallback = True
+                    logger.info(f"✅ Groq with session context took {elapsed:.2f}s - SUCCESS")
+                else:
+                    logger.warning(f"❌ Groq returned None after {elapsed:.2f}s")
+            
+            # Final fallback: return informative message if all LLMs fail
+            if answer is None:
+                answer = (
+                    f"I couldn't find relevant information in {session_name} documents, "
+                    f"and my LLM providers are currently unavailable. Please try again later."
+                )
+                llm_model = "N/A (no-context-fallback)"
+                llm_used = "no-context-fallback"
+                logger.warning(f"⚠️ All LLM providers failed for no-chunks query")
+            
             sources = []
         else:
             # We have chunks - try to answer even if similarity is low
@@ -1117,37 +2346,102 @@ async def query_session(session_id: str, query: QueryRequest):
                     f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" 
                     for i, c in enumerate(top_chunks)
                 )
+                session_name = session.get("session_name", "the domain")
+            
                 system_prompt = (
-                    "You are a helpful assistant answering questions based only on the provided context. "
-                    "Cite sources as [Source N]. If the answer is not in the context, say so.\n\n"
+                    "You are a helpful assistant answering questions based only on the provided context in strictly under 40 words."
+                    "Cite sources as [Source N]. If the answer is not in the context, then consider this You're providing training/learning support for: {session_name}\n\n"
+                f"Question: {question}\n\n"
+                f"The uploaded documents don't contain information about this. "
+                f"Using your knowledge, explain this in a way that's relevant to {session_name}. "
+                f"Include:\n"
+                f"- What is this concept/topic?\n"
+                f"- How does it apply or relate to {session_name}?\n\n"
+                f"Keep response under 50 words. Provide one integrated answer (don't separate).\n\n"
                 )
             else:
                 context = "\n\n".join(
                     f"{c['text']}" 
                     for c in top_chunks
                 )
+                session_name = session.get("session_name", "the domain")
+            
                 system_prompt = (
-                    "You are a helpful assistant answering questions based only on the provided context. "
-                    "If the answer is not in the context, say so.\n\n"
+                    "You are a helpful assistant answering questions based only on the provided context in strictly under 40 words."
+                    "If the answer is not in the context, then consider this You're providing training/learning support for: {session_name}\n\n"
+                f"Question: {question}\n\n"
+                f"The uploaded documents don't contain information about this. "
+                f"Using your knowledge, explain this in a way that's relevant to {session_name}. "
+                f"Include:\n"
+                f"- What is this concept/topic?\n"
+                f"- How does it apply or relate to {session_name}?\n\n"
+                f"Keep response under 50 words. Provide one integrated answer (don't separate).\n\n"
                 )
             prompt = f"{system_prompt}Context:\n{context}\n\nQuestion: {question}\nAnswer:"
             
-            # Try primary LLM
+            # Log the prompt being sent to LLM
+            logger.info(f"\n{'='*80}")
+            logger.info(f"📝 PROMPT BEING SENT TO LLM:")
+            logger.info(f"{'='*80}")
+            logger.info(f"{prompt}")
+            logger.info(f"{'='*80}\n")
+            
+            # Try primary LLM - prioritize ChatGPT first for reliability
             answer = None
             llm_used = primary_llm
             generation_fallback = False
             
-            if primary_llm == "gemini" and gemini_key:
-                answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
-                if answer:
-                    llm_model = GEMINI_GEN_MODEL
-            elif primary_llm == "chatgpt" and chatgpt_key:
+            start_time = time.time()
+            # Always try ChatGPT first (most reliable)
+            if chatgpt_key:
+                logger.info("🔴 Trying ChatGPT (1st priority)...")
                 answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
+                elapsed = time.time() - start_time
                 if answer:
                     llm_model = OPENAI_GEN_MODEL
+                    llm_used = "chatgpt"
+                    logger.info(f"✅ ChatGPT generation took {elapsed:.2f}s - SUCCESS")
+                else:
+                    logger.warning(f"❌ ChatGPT generation returned None after {elapsed:.2f}s")
+            
+            # Fallback to Gemini if ChatGPT fails
+            if answer is None and gemini_key:
+                logger.info("🔴 Trying Gemini (2nd priority)...")
+                answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
+                elapsed = time.time() - start_time
+                if answer:
+                    llm_model = GEMINI_GEN_MODEL
+                    llm_used = "gemini"
+                    logger.info(f"✅ Gemini generation took {elapsed:.2f}s - SUCCESS")
+                else:
+                    logger.warning(f"❌ Gemini generation returned None after {elapsed:.2f}s")
+            
+            # Fallback to alternative cloud provider (before trying Groq/Ollama)
+            if answer is None:
+                if primary_llm == "gemini" and chatgpt_key:
+                    logger.info("Trying ChatGPT as fallback...")
+                    start_time = time.time()
+                    answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
+                    if answer:
+                        used_fallback = True
+                        generation_fallback = True
+                        llm_used = "chatgpt-fallback"
+                        llm_model = OPENAI_GEN_MODEL
+                        logger.info(f"⏱️ ChatGPT fallback took {time.time() - start_time:.2f}s")
+                elif primary_llm == "chatgpt" and gemini_key:
+                    logger.info("Trying Gemini as fallback...")
+                    start_time = time.time()
+                    answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
+                    if answer:
+                        used_fallback = True
+                        generation_fallback = True
+                        llm_used = "gemini-fallback"
+                        llm_model = GEMINI_GEN_MODEL
+                        logger.info(f"⏱️ Gemini fallback took {time.time() - start_time:.2f}s")
             
             # Fallback to Groq, then Ollama, then heuristic
             if answer is None:
+                start_time = time.time()
                 answer, fallback_provider = generate_with_local_llm(question, top_chunks)
                 if answer:
                     used_fallback = True
@@ -1155,20 +2449,21 @@ async def query_session(session_id: str, query: QueryRequest):
                     if fallback_provider == "groq":
                         llm_used = "groq-fallback"
                         llm_model = GROQ_GEN_MODEL
-                        logger.info("Using Groq fallback for generation")
+                        logger.info(f"⏱️ Groq fallback took {time.time() - start_time:.2f}s")
                     elif fallback_provider == "ollama":
                         llm_used = "ollama-fallback"
                         llm_model = "ollama-llama3"
-                        logger.info("Using Ollama fallback for generation")
+                        logger.info(f"⏱️ Ollama fallback took {time.time() - start_time:.2f}s")
             
             # Final fallback to heuristic
             if answer is None:
+                start_time = time.time()
                 answer = heuristic_answer(question, top_chunks)
                 used_fallback = True
                 generation_fallback = True
                 llm_used = "heuristic"
                 llm_model = "rule-based-extraction"
-                logger.info("Using heuristic fallback for generation")
+                logger.info(f"⏱️ Heuristic fallback took {time.time() - start_time:.2f}s")
             
             # Remove [Source N] tags from answer if sources are hidden
             if not SHOW_SOURCES and answer:
@@ -1182,6 +2477,9 @@ async def query_session(session_id: str, query: QueryRequest):
         conversation = db.add_conversation(
             session_id, question, answer, llm_used, sources
         )
+        
+        total_time = time.time() - query_start_time
+        logger.info(f"✅ Query completed in {total_time:.2f}s total")
         
         return QueryResponse(
             conversation_id=conversation["conversation_id"],
@@ -1203,6 +2501,9 @@ async def query_session(session_id: str, query: QueryRequest):
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to query session: {str(e)}")
+
+
+
 
 @app.get("/sessions/{session_id}/conversations")
 async def get_conversations(session_id: str, limit: Optional[int] = None):
@@ -1301,5 +2602,5 @@ async def session_diagnostics(session_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8001, reload=False)
 
