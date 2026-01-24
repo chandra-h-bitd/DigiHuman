@@ -2258,84 +2258,10 @@ async def query_session(session_id: str, query: QueryRequest):
         llm_model = ""
         generation_fallback = False
         if not top_chunks:
-            # No chunks found - ask LLM directly without document context
-            logger.info(f"⚠️ No relevant chunks found in documents. Asking LLM directly...")
-            session_name = session.get("session_name", "the domain")
-            
-            # Refined prompt: focused on concept + relevance to session type
-            # Works for ANY session type (technical, business, etc.)
-            prompt = (
-                f"You're providing training/learning support for: {session_name}\n\n"
-                f"Question: {question}\n\n"
-                f"The uploaded documents don't contain information about this. "
-                f"Using your knowledge, explain this in a way that's relevant to {session_name}. "
-                f"Include:\n"
-                f"- What is this concept/topic?\n"
-                f"- How does it apply or relate to {session_name}?\n\n"
-                f"Keep response under 50 words. Provide one integrated answer (don't separate)."
-            )
-            
-            # Log the prompt being sent to LLM
-            logger.info(f"\n{'='*80}")
-            logger.info(f"📝 PROMPT BEING SENT TO LLM (NO-CHUNKS FOUND - DIRECT QUERY):")
-            logger.info(f"{'='*80}")
-            logger.info(f"{prompt}")
-            logger.info(f"{'='*80}\n")
-            
-            # Try LLM fallback chain with session context
-            answer = None
-            llm_used = "no-chunks-llm"
-            
-            start_time = time.time()
-            # Try ChatGPT first
-            if chatgpt_key:
-                logger.info("🔴 Trying ChatGPT (1st priority) with session context...")
-                answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
-                elapsed = time.time() - start_time
-                if answer:
-                    llm_model = OPENAI_GEN_MODEL
-                    llm_used = "chatgpt-no-chunks"
-                    generation_fallback = True
-                    logger.info(f"✅ ChatGPT with session context took {elapsed:.2f}s - SUCCESS")
-                else:
-                    logger.warning(f"❌ ChatGPT returned None after {elapsed:.2f}s")
-            
-            # Fallback to Gemini if ChatGPT fails
-            if answer is None and gemini_key:
-                logger.info("🔴 Trying Gemini (2nd priority) with session context...")
-                answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
-                elapsed = time.time() - start_time
-                if answer:
-                    llm_model = GEMINI_GEN_MODEL
-                    llm_used = "gemini-no-chunks"
-                    generation_fallback = True
-                    logger.info(f"✅ Gemini with session context took {elapsed:.2f}s - SUCCESS")
-                else:
-                    logger.warning(f"❌ Gemini returned None after {elapsed:.2f}s")
-            
-            # Fallback to Groq
-            if answer is None:
-                logger.info("🔴 Trying Groq with session context...")
-                answer = generate_with_groq(prompt)
-                elapsed = time.time() - start_time
-                if answer:
-                    llm_model = GROQ_GEN_MODEL
-                    llm_used = "groq-no-chunks"
-                    generation_fallback = True
-                    logger.info(f"✅ Groq with session context took {elapsed:.2f}s - SUCCESS")
-                else:
-                    logger.warning(f"❌ Groq returned None after {elapsed:.2f}s")
-            
-            # Final fallback: return informative message if all LLMs fail
-            if answer is None:
-                answer = (
-                    f"I couldn't find relevant information in {session_name} documents, "
-                    f"and my LLM providers are currently unavailable. Please try again later."
-                )
-                llm_model = "N/A (no-context-fallback)"
-                llm_used = "no-context-fallback"
-                logger.warning(f"⚠️ All LLM providers failed for no-chunks query")
-            
+            # No chunks found at all - truly out of context
+            answer = "I'm sorry, but I couldn't find relevant information in the documents to answer your question. The query appears to be out of context."
+            llm_used = "out-of-context"
+            llm_model = "N/A (out of context)"
             sources = []
         else:
             # We have chunks - try to answer even if similarity is low
@@ -2346,75 +2272,45 @@ async def query_session(session_id: str, query: QueryRequest):
                     f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" 
                     for i, c in enumerate(top_chunks)
                 )
-                session_name = session.get("session_name", "the domain")
-            
                 system_prompt = (
                     "You are a helpful assistant answering questions based only on the provided context in strictly under 40 words."
-                    "Cite sources as [Source N]. If the answer is not in the context, then consider this You're providing training/learning support for: {session_name}\n\n"
-                f"Question: {question}\n\n"
-                f"The uploaded documents don't contain information about this. "
-                f"Using your knowledge, explain this in a way that's relevant to {session_name}. "
-                f"Include:\n"
-                f"- What is this concept/topic?\n"
-                f"- How does it apply or relate to {session_name}?\n\n"
-                f"Keep response under 50 words. Provide one integrated answer (don't separate).\n\n"
+                    "Cite sources as [Source N]. If the answer is not in the context, say so.\n\n"
                 )
             else:
                 context = "\n\n".join(
                     f"{c['text']}" 
                     for c in top_chunks
                 )
-                session_name = session.get("session_name", "the domain")
-            
                 system_prompt = (
                     "You are a helpful assistant answering questions based only on the provided context in strictly under 40 words."
-                    "If the answer is not in the context, then consider this You're providing training/learning support for: {session_name}\n\n"
-                f"Question: {question}\n\n"
-                f"The uploaded documents don't contain information about this. "
-                f"Using your knowledge, explain this in a way that's relevant to {session_name}. "
-                f"Include:\n"
-                f"- What is this concept/topic?\n"
-                f"- How does it apply or relate to {session_name}?\n\n"
-                f"Keep response under 50 words. Provide one integrated answer (don't separate).\n\n"
+                    "If the answer is not in the context, say so.\n\n"
                 )
             prompt = f"{system_prompt}Context:\n{context}\n\nQuestion: {question}\nAnswer:"
             
-            # Log the prompt being sent to LLM
-            logger.info(f"\n{'='*80}")
-            logger.info(f"📝 PROMPT BEING SENT TO LLM:")
-            logger.info(f"{'='*80}")
-            logger.info(f"{prompt}")
-            logger.info(f"{'='*80}\n")
-            
-            # Try primary LLM - prioritize ChatGPT first for reliability
+            # Try primary LLM
             answer = None
             llm_used = primary_llm
             generation_fallback = False
             
             start_time = time.time()
-            # Always try ChatGPT first (most reliable)
-            if chatgpt_key:
-                logger.info("🔴 Trying ChatGPT (1st priority)...")
-                answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
-                elapsed = time.time() - start_time
-                if answer:
-                    llm_model = OPENAI_GEN_MODEL
-                    llm_used = "chatgpt"
-                    logger.info(f"✅ ChatGPT generation took {elapsed:.2f}s - SUCCESS")
-                else:
-                    logger.warning(f"❌ ChatGPT generation returned None after {elapsed:.2f}s")
-            
-            # Fallback to Gemini if ChatGPT fails
-            if answer is None and gemini_key:
-                logger.info("🔴 Trying Gemini (2nd priority)...")
+            if primary_llm == "gemini" and gemini_key:
+                logger.info("🔴 Trying Gemini (primary LLM)...")
                 answer = generate_with_gemini(prompt, gemini_key, GEMINI_GEN_MODEL)
                 elapsed = time.time() - start_time
                 if answer:
                     llm_model = GEMINI_GEN_MODEL
-                    llm_used = "gemini"
                     logger.info(f"✅ Gemini generation took {elapsed:.2f}s - SUCCESS")
                 else:
                     logger.warning(f"❌ Gemini generation returned None after {elapsed:.2f}s")
+            elif primary_llm == "chatgpt" and chatgpt_key:
+                logger.info("🔴 Trying ChatGPT (primary LLM)...")
+                answer = generate_with_chatgpt(prompt, chatgpt_key, OPENAI_GEN_MODEL)
+                elapsed = time.time() - start_time
+                if answer:
+                    llm_model = OPENAI_GEN_MODEL
+                    logger.info(f"✅ ChatGPT generation took {elapsed:.2f}s - SUCCESS")
+                else:
+                    logger.warning(f"❌ ChatGPT generation returned None after {elapsed:.2f}s")
             
             # Fallback to alternative cloud provider (before trying Groq/Ollama)
             if answer is None:
