@@ -144,6 +144,23 @@
               <mat-icon>cloud_upload</mat-icon>
               <p>Drag & drop files here</p>
               <p class="upload-hint">or</p>
+              
+              <!-- Document Type Selection -->
+              <mat-form-field appearance="outline" class="doc-type-field">
+                <mat-label>Document Type</mat-label>
+                <mat-select [(ngModel)]="selectedDocType" [disabled]="uploading">
+                  <mat-option value="summary">
+                    <mat-icon>summarize</mat-icon> Summary
+                  </mat-option>
+                  <mat-option value="qa">
+                    <mat-icon>quiz</mat-icon> Q&A
+                  </mat-option>
+                  <mat-option value="training_curriculum">
+                    <mat-icon>school</mat-icon> Training Curriculum
+                  </mat-option>
+                </mat-select>
+              </mat-form-field>
+              
               <input type="file" #fileInput (change)="onFileSelected($event)" 
                      accept=".pdf,.docx,.txt,.md,.markdown" style="display: none;">
               <button mat-raised-button color="primary" (click)="fileInput.click()" 

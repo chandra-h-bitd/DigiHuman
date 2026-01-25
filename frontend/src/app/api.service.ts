@@ -89,9 +89,10 @@ export class ApiService {
 
   // ========== Document Management ==========
 
-  uploadDocument(sessionId: string, file: File): Observable<any> {
+  uploadDocument(sessionId: string, file: File, docType: string = 'summary'): Observable<any> {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('doc_type', docType);
 
     return this.http.post(`${this.baseUrl}/sessions/${sessionId}/upload`, formData, {
       reportProgress: true,

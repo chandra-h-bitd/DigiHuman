@@ -57,10 +57,20 @@ else:
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['REQUESTS_CA_BUNDLE'] = ''
 os.environ['HF_HUB_DISABLE_SSL'] = '1'  # Disable SSL for Hugging Face Hub
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'  # Disable HF telemetry
+os.environ['TRANSFORMERS_OFFLINE'] = '0'  # Allow online model downloads but with SSL disabled
+os.environ['HF_ENDPOINT'] = 'https://huggingface.co'
 
 # Configure requests library to not verify SSL
 import requests
 requests.packages.urllib3.disable_warnings()
+
+# Patch the requests Session to disable SSL verification globally
+original_request = requests.Session.request
+def patched_request(self, method, url, **kwargs):
+    kwargs['verify'] = False
+    return original_request(self, method, url, **kwargs)
+requests.Session.request = patched_request
 
 # Download NLTK data with SSL fix
 _nltk_available = False
@@ -792,16 +802,18 @@ def generate_summary_with_gemini(text: str, api_key: str, doc_name: str, model_n
         model_name = GEMINI_GEN_MODEL
     
     # Limit text to avoid token limits
-    max_chars = 5000
+    max_chars = 9000
     text_excerpt = text[:max_chars]
     
-    prompt = f"""Generate a summary of exactly 50-60 words (no more, no less) from the following document.
+    prompt = f"""Generate a comprehensive summary of exactly 100-150 words from the following document.
+IMPORTANT: Do NOT include any financial details, numbers, amounts, prices, or financial information (strictly).
 Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+Make the summary informative and cover all key points.
 
 Document:
 {text_excerpt}
 
-Summary (50-60 words only):"""
+Summary (100-150 words):"""
     
     result = generate_with_gemini(prompt, api_key, model_name)
     if result:
@@ -817,13 +829,15 @@ def generate_summary_with_chatgpt(text: str, api_key: str, doc_name: str, model_
     max_chars = 5000
     text_excerpt = text[:max_chars]
     
-    prompt = f"""Generate a summary of exactly 50-60 words (no more, no less) from the following document.
+    prompt = f"""Generate a comprehensive summary of exactly 100-150 words from the following document.
+IMPORTANT: Do NOT include any financial details, numbers, amounts, prices, or financial information (strictly).
 Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+Make the summary informative and cover all key points.
 
 Document:
 {text_excerpt}
 
-Summary (50-60 words only):"""
+Summary (100-150 words):"""
     
     result = generate_with_chatgpt(prompt, api_key, model_name)
     if result:
@@ -845,13 +859,15 @@ def generate_summary_with_groq(text: str, api_key: Optional[str], doc_name: str)
     max_chars = 5000
     text_excerpt = text[:max_chars]
     
-    prompt = f"""Generate a summary of exactly 50-60 words (no more, no less) from the following document.
+    prompt = f"""Generate a comprehensive summary of exactly 100-150 words from the following document.
+IMPORTANT: Do NOT include any financial details, numbers, amounts, prices, or financial information (strictly).
 Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+Make the summary informative and cover all key points.
 
 Document:
 {text_excerpt}
 
-Summary (50-60 words only):"""
+Summary (100-150 words):"""
     
     result = generate_with_groq(prompt, api_key)
     if result:
@@ -921,13 +937,15 @@ def generate_session_summary(combined_text: str, session: Dict[str, Any]) -> Opt
     max_chars = 5000
     text_excerpt = combined_text[:max_chars]
     
-    prompt = f"""Generate a consolidated summary of exactly 50-60 words (no more, no less) from all documents.
+    prompt = f"""Generate a comprehensive consolidated summary of exactly 100-150 words from all documents.
+IMPORTANT: Do NOT include any financial details, numbers, amounts, prices, or financial information (strictly).
 Include ONLY the summary content. Do NOT include document titles, file names, or labels.
+Make the summary informative and cover all key points.
 
 Documents Content:
 {text_excerpt}
 
-Consolidated Summary (50-60 words only):"""
+Consolidated Summary (100-150 words):"""
     
     # Try primary LLM first
     if primary_llm == "gemini" and gemini_key:
@@ -2264,9 +2282,8 @@ async def query_session(session_id: str, query: QueryRequest):
             llm_model = "N/A (out of context)"
             sources = []
         else:
-            # We have chunks - try to answer even if similarity is low
-            # This ensures fallback LLM still works with available context
-            # Build prompt
+            # We have chunks - answer based on full document context
+            # Build prompt with COMPLETE chunks (no truncation)
             if SHOW_SOURCES:
                 context = "\n\n".join(
                     f"[Source {i+1} | {c['doc']}#{c['chunk']}]\n{c['text']}" 

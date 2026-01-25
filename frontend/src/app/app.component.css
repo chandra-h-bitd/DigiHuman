@@ -367,6 +367,12 @@
   color: #a0aec0;
 }
 
+.doc-type-field {
+  width: 100%;
+  margin: 1rem 0;
+  text-align: left;
+}
+
 .upload-progress {
   margin: 1rem;
   padding: 1rem;

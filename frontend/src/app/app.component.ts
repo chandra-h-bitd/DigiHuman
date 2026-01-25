@@ -70,6 +70,7 @@ export class AppComponent implements OnInit {
   uploading = false;
   currentDocument: string = '';
   documents: Document[] = [];
+  selectedDocType: 'summary' | 'qa' | 'training_curriculum' = 'summary';
   
   // Chat
   messages: ChatMessage[] = [];
@@ -274,7 +275,7 @@ export class AppComponent implements OnInit {
     this.uploadProgress = 0;
     this.currentDocument = file.name;
 
-    this.api.uploadDocument(this.currentSession.session_id, file).subscribe({
+    this.api.uploadDocument(this.currentSession.session_id, file, this.selectedDocType).subscribe({
       next: (event: any) => {
         if (event.type === HttpEventType.UploadProgress) {
           this.uploadProgress = Math.round(100 * event.loaded / (event.total || event.loaded));
